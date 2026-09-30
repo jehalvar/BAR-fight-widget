@@ -70,9 +70,10 @@ jobs:
             if (-not (Test-Path -LiteralPath $file)) { throw "Missing release artifact: $file" }
             $metadata = [Diagnostics.FileVersionInfo]::GetVersionInfo($file)
             Write-Output ([IO.Path]::GetFileName($file) + ': ' + $metadata.ProductName + ' / ' + $metadata.ProductVersion + ' / ' + $metadata.FileVersion)
-            if ($metadata.ProductName -ne 'BAR Fight' -or
-                $metadata.ProductVersion -ne $env:RELEASE_VERSION -or
-                $metadata.FileVersion -ne ($env:RELEASE_VERSION + '.0')) {
+            # Inno Setup pads its string-table values with spaces.
+            if ($metadata.ProductName.Trim() -ne 'BAR Fight' -or
+                $metadata.ProductVersion.Trim() -ne $env:RELEASE_VERSION -or
+                $metadata.FileVersion.Trim() -ne ($env:RELEASE_VERSION + '.0')) {
               throw "Inconsistent product/version metadata: $file"
             }
             if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'NotSigned') {
