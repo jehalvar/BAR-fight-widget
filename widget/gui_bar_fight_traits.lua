@@ -476,6 +476,20 @@ local function selectedRow()
     for _, row in ipairs(roster) do if row.player_id == selectedPlayer then return row end end
 end
 
+local function copyProfileLink(account)
+    local url = "https://bar-fight.com/players/" .. account
+    if type(Spring.SetClipboard) == "function" then
+        local ok = pcall(Spring.SetClipboard, url)
+        if ok then
+            status = "Player profile link copied."
+            if Spring.Echo then Spring.Echo("[BAR Fight] Player profile link copied.") end
+            return
+        end
+    end
+    status = "Clipboard unavailable; profile link sent to the game log."
+    if Spring.Echo then Spring.Echo("[BAR Fight] " .. url) end
+end
+
 local function hoverPosition(profile, row)
     local best
     for _, position in ipairs(profile.positions) do
@@ -606,24 +620,27 @@ local function drawDetails(x1, bottom, x2, top)
         return
     end
     drawText("Account " .. row.account_id, x1, top - 41, 11, palette.muted)
+    button(x1, top - 72, x2, top - 48, "Copy profile link",
+        function() copyProfileLink(row.account_id) end)
+    local contentTop = top - 30
     local profile = profiles[row.account_id]
     if not profile then
-        drawText(pendingAt and "Loading this player’s historical profile..." or "No historical profile is available yet.", x1, top - 75, 12, palette.muted)
-        drawText("Keep the BAR Fight helper running, then refresh.", x1, top - 97, 12, palette.muted)
+        drawText(pendingAt and "Loading this player’s historical profile..." or "No historical profile is available yet.", x1, contentTop - 45, 12, palette.muted)
+        drawText("Keep the BAR Fight helper running, then refresh.", x1, contentTop - 67, 12, palette.muted)
         return
     end
     local dateLabel = profile.period.start_date ~= "" and (profile.period.start_date .. " to " .. profile.period.end_date .. " UTC") or "Historical replay interval"
     local freshness = profile.generated_at ~= "" and ("  |  Updated " .. profile.generated_at) or ""
     drawText(fit(dateLabel .. freshness .. (profile.stale and "  |  Stale cache" or ""), x2 - x1, 11),
-        x1, top - 62, 11, profile.stale and palette.warning or palette.muted)
+        x1, contentTop - 32, 11, profile.stale and palette.warning or palette.muted)
     if profile.status == "preparing" or profile.preparing then
         drawText(profile.preparation_note ~= "" and profile.preparation_note or "History is being prepared...",
-            x1, top - 78, 10, palette.warning)
+            x1, contentTop - 48, 10, palette.warning)
     end
     if #profile.positions == 0 then
         local message = profile.status == "preparing" and "This profile is being prepared. Refresh in a minute."
             or "No captured games for this player in the current interval."
-        drawText(fit(message, x2 - x1, 12), x1, top - 92, 12, palette.muted)
+        drawText(fit(message, x2 - x1, 12), x1, contentTop - 62, 12, palette.muted)
         return
     end
     local position
@@ -632,15 +649,15 @@ local function drawDetails(x1, bottom, x2, top)
         for _, candidate in ipairs(profile.positions) do if not position or candidate.games > position.games then position = candidate end end
         selectedSpot = position.spot
     end
-    drawText("Historical position - choose a role to inspect", x1, top - 87, 12, palette.muted)
+    drawText("Historical position - choose a role to inspect", x1, contentTop - 57, 12, palette.muted)
     local chipWidth = (x2 - x1 - 8) / 2
     for index, candidate in ipairs(profile.positions) do
         local col, line = (index - 1) % 2, math.floor((index - 1) / 2)
-        local chipX, chipY = x1 + col * (chipWidth + 8), top - 121 - line * 29
+        local chipX, chipY = x1 + col * (chipWidth + 8), contentTop - 91 - line * 29
         button(chipX, chipY, chipX + chipWidth, chipY + 25, candidate.position_name,
             function() selectedSpot, expandedTrait, traitScroll = candidate.spot, nil, 0 end, candidate.spot == selectedSpot)
     end
-    local y = top - 123 - math.ceil(#profile.positions / 2) * 29
+    local y = contentTop - 93 - math.ceil(#profile.positions / 2) * 29
     drawText(tostring(position.games) .. " recorded games for this position", x1, y, 11, palette.muted)
     y = y - 18
     if position.status == "preparing" or position.preparing or profile.preparing then

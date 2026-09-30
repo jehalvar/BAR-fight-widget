@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.1.7',
+    [string]$Version = '0.1.8',
     [string]$InnoCompiler = (Join-Path $PSScriptRoot '.build-tools\InnoSetup\ISCC.exe'),
     [string]$SigningConfig,
     [switch]$RequireAuthenticode,

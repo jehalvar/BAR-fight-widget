@@ -24,6 +24,7 @@ ENGINE = r'''
 widget = {}
 WG = {}
 files, written, drawn, rectangles, players, echoes = {}, {}, {}, {}, {}, {}
+clipboard = {}
 Game = {mapName = "Supreme Isthmus v2.1"}
 os = {time = function() return 1720000000 end, date = os.date}
 io = {open = function(path, mode)
@@ -54,6 +55,7 @@ Spring = {
     IsGUIHidden = function() return false end,
     GetMouseState = function() return mouseX or 0, mouseY or 0 end,
     Echo = function(text) echoes[#echoes+1] = text end,
+    SetClipboard = function(text) clipboard[#clipboard+1] = text end,
 }
 gl = {
     Color = function(r,g,b,a) assert(type(r)=="number" and type(g)=="number" and type(b)=="number" and type(a)=="number") end,
@@ -563,6 +565,39 @@ class WidgetTests(unittest.TestCase):
         self.assertTrue(self.call('MousePress', 1100, 750, 1))
         self.assertTrue(self.call('MousePress', 1100, 750, 3))
         self.assertTrue(self.call('IsAbove', 1100, 750))
+
+    def test_profile_link_is_copied_only_after_click_for_the_selected_account(self):
+        self.start()
+        self.draw()
+        self.assertEqual(len(self.globals.clipboard), 0)
+        self.hover_name('Other name')
+        self.assertEqual(len(self.globals.clipboard), 0)
+        self.click_text('Other name')
+        self.assertIn('Copy profile link', self.draw())
+        self.click_text('Copy profile link')
+        self.assertEqual(list(self.globals.clipboard.values()), ['https://bar-fight.com/players/200'])
+
+    def test_profile_link_is_available_without_traits_but_not_without_account_id(self):
+        self.start()
+        texts = self.draw()
+        self.assertTrue(any('Loading this player' in text or 'No historical profile' in text for text in texts))
+        self.assertIn('Copy profile link', texts)
+        self.add_player(3, 'Unknown account', None, 2)
+        self.call('Update', 2.1)
+        self.click_text('Unknown account')
+        texts = self.draw()
+        self.assertIn('No stable account ID supplied by this match.', texts)
+        self.assertNotIn('Copy profile link', texts)
+        self.assertEqual(len(self.globals.clipboard), 0)
+
+    def test_profile_link_falls_back_to_echo_when_clipboard_is_unavailable_or_throws(self):
+        self.start()
+        self.lua.execute('Spring.SetClipboard = nil')
+        self.click_text('Copy profile link')
+        self.assertIn('[BAR Fight] https://bar-fight.com/players/100', list(self.globals.echoes.values()))
+        self.lua.execute('Spring.SetClipboard = function() error("clipboard failed") end')
+        self.click_text('Copy profile link')
+        self.assertEqual(list(self.globals.echoes.values()).count('[BAR Fight] https://bar-fight.com/players/100'), 2)
 
     def panel_rect(self):
         self.globals.rectangles = self.lua.table()
