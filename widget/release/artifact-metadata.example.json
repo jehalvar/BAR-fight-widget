@@ -1,0 +1,13 @@
+{
+  "Endpoint": "https://weu.codesigning.azure.net/",
+  "CodeSigningAccountName": "YOUR_VERIFIED_SIGNING_ACCOUNT",
+  "CertificateProfileName": "YOUR_PUBLIC_TRUST_PROFILE",
+  "ExcludeCredentials": [
+    "EnvironmentCredential",
+    "WorkloadIdentityCredential",
+    "ManagedIdentityCredential",
+    "SharedTokenCacheCredential",
+    "VisualStudioCredential",
+    "VisualStudioCodeCredential"
+  ]
+}

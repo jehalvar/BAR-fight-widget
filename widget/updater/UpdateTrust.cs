@@ -1,0 +1,4 @@
+// Public release-verification key. The private key is never shipped.
+internal static class UpdateTrust {
+    public const string PublicKeyXml = @"<RSAKeyValue><Modulus>s/abvmM/WFh56fAqUBUDRhdFtG4gGyp7f1ft/jm/iu/RjZXoxR9AtcxpNp96AVVDIT2Plcc6mVB5NIz+DB/BqCEmwAXY7UFM0E3U9kE4ZsQa7MIMk6JGNlJiibsWUSNgYtHRPvYuI4v51+sGFpUpUx8eBrgdG3Ld4bDMQxLlvBriMtsAmvKPSzEbJG0tkO8UoKwHHB70VrSLPfJTtHfjO53/JD7F+yG2XIVRDL3NAGcsAGlIRD4iKt5EKgJBuuijIHlXG87a7WBhOc25EGGPPTUmo5+TV0+r1/bwRbGD0pz1jV65q1BpneZAQ6QyZm8IQP/xEJZlAH5UfRqsCnTeO/tIpPlL0wCpEeV+vxUg884FRx08UXdZEcOkxlg9JoTg1lHNNyi2kDkipxQ0T017IhuTYhh8DSObem1lvG44uD7HZvGLcVj+W89oAJUBJ/9B6pN6zV0VhuJl+7yO/OvoTgZZzcuCOX6i80nfYSd1tjAj3GwnIOpaFMMXVRrljzFV</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
+}

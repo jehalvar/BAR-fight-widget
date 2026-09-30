@@ -1,0 +1,116 @@
+name: Build unsigned Windows widget
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_VERSION: '0.1.7'
+
+jobs:
+  build:
+    name: Test and build Windows installer
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out the triggering source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Locate the provided build tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # GitHub's Windows Server 2022 image lists Inno Setup 6.7.1:
+          # https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
+          # Fail on tool drift instead of downloading an unpinned replacement.
+          $inno = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $inno)) { throw 'The expected preinstalled Inno Setup compiler is missing.' }
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'The Windows .NET Framework C# compiler is missing.' }
+          # ISCC's PE version may be 0.0.0.0. Verify its engine version from
+          # the real compilation output in the build step below.
+          Write-Output ('C# compiler: ' + [Diagnostics.FileVersionInfo]::GetVersionInfo($compiler).FileVersion)
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value ('INNO_COMPILER=' + $inno) -Encoding utf8
+
+      - name: Run offline helper tests
+        run: ./widget/bridge/test_bridge.ps1
+
+      - name: Run offline updater verification and recovery tests
+        run: ./widget/updater/test_updater.ps1
+
+      - name: Build unsigned release from this checkout
+        run: |
+          # Deliberately omit SigningConfig and PublishUpdate. CI needs no
+          # publisher certificate, private update key, or production access.
+          $output = @(./widget/build.ps1 -Version $env:RELEASE_VERSION -InnoCompiler $env:INNO_COMPILER)
+          $output | ForEach-Object { Write-Output $_ }
+          if (-not ($output | Where-Object { [string]$_ -match '^Compiler engine version: Inno Setup 6\.7\.1\s*$' })) {
+            throw 'Expected Inno Setup 6.7.1. Review the compiler output and tool pin before uploading artifacts.'
+          }
+
+      - name: Verify release metadata and installer checksum
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $PWD "widget\dist\BAR-Fight-Setup-$env:RELEASE_VERSION.exe"
+          $files = @(
+            (Join-Path $PWD 'widget\build\BarFightBridge.exe'),
+            (Join-Path $PWD 'widget\build\BarFightUpdater.exe'),
+            $setup
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "Missing release artifact: $file" }
+            $metadata = [Diagnostics.FileVersionInfo]::GetVersionInfo($file)
+            if ($metadata.ProductName -ne 'BAR Fight' -or
+                $metadata.ProductVersion -ne $env:RELEASE_VERSION -or
+                $metadata.FileVersion -ne ($env:RELEASE_VERSION + '.0')) {
+              throw "Inconsistent product/version metadata: $file"
+            }
+            if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'NotSigned') {
+              throw "This verification build must produce unsigned artifacts: $file"
+            }
+          }
+          $digest = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = $digest + '  ' + [IO.Path]::GetFileName($setup)
+          if ([IO.File]::ReadAllText($setup + '.sha256').Trim() -ne $expected) { throw 'Installer checksum does not match the built installer.' }
+          $revision = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not record the source revision.' }
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $provenance = [ordered]@{
+            repository = $env:GITHUB_REPOSITORY
+            commit = $revision.Trim()
+            workflow_run_id = $env:GITHUB_RUN_ID
+            workflow_run_attempt = $env:GITHUB_RUN_ATTEMPT
+            release_version = $env:RELEASE_VERSION
+            runner_image = $env:ImageVersion
+            inno_setup_version = '6.7.1'
+            compiler_version = [Diagnostics.FileVersionInfo]::GetVersionInfo($compiler).FileVersion
+            installer_sha256 = $digest
+            windows_publisher_signed = $false
+          }
+          [IO.File]::WriteAllText((Join-Path $PWD 'widget\dist\build-provenance.json'), ($provenance | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+
+      - name: Verify installation, upgrade and removal on the clean runner
+        run: ./widget/test_installer.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Upload the unsigned release for review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: BAR-Fight-unsigned-${{ env.RELEASE_VERSION }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          path: |
+            widget/dist/BAR-Fight-Setup-${{ env.RELEASE_VERSION }}.exe
+            widget/dist/BAR-Fight-Setup-${{ env.RELEASE_VERSION }}.exe.sha256
+            widget/dist/build-provenance.json
+            widget/build/BarFightBridge.exe
+            widget/build/BarFightUpdater.exe

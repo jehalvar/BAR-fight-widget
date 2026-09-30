@@ -1,0 +1,7 @@
+{
+  "provider": "artifact-signing",
+  "signTool": "C:\\Program Files (x86)\\Microsoft\\ArtifactSigningClientTools\\bin\\signtool.exe",
+  "dlib": "C:\\Program Files (x86)\\Microsoft\\ArtifactSigningClientTools\\bin\\Azure.CodeSigning.Dlib.dll",
+  "metadataFile": "C:\\BARFightRelease\\artifact-metadata.json",
+  "timestampUrl": "http://timestamp.acs.microsoft.com"
+}

@@ -1,0 +1,7 @@
+{
+  "provider": "certificate-store",
+  "signTool": "C:\\Path\\To\\WindowsSDK\\x64\\signtool.exe",
+  "thumbprint": "YOUR_40_CHARACTER_CERTIFICATE_THUMBPRINT",
+  "localMachine": false,
+  "timestampUrl": "http://time.certum.pl"
+}
