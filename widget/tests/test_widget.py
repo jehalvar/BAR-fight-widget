@@ -6,6 +6,7 @@ The harness executes the real widget under Lua 5.1, without BAR, network access,
 or writes to the player's configuration directory.
 """
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import unittest
@@ -26,7 +27,8 @@ WG = {}
 files, written, drawn, rectangles, players, echoes = {}, {}, {}, {}, {}, {}
 clipboard = {}
 Game = {mapName = "Supreme Isthmus v2.1"}
-os = {time = function() return 1720000000 end, date = os.date}
+wallTime = 1720000000
+os = {time = function() return wallTime end, date = os.date}
 io = {open = function(path, mode)
     if mode == "wb" then
         local result = {value = ""}
@@ -91,6 +93,8 @@ class WidgetTests(unittest.TestCase):
             spectator=spectator, keys=self.lua.table_from(keys)))
 
     def call(self, method, *args):
+        if method == 'Update':
+            self.globals.wallTime += args[0]
         return self.widget[method](self.widget, *args)
 
     def start(self):
@@ -103,6 +107,8 @@ class WidgetTests(unittest.TestCase):
 
     def respond(self, profiles=None, **extra):
         response = dict(schema=1, request_id=self.request()['request_id'], ok=True,
+                        cached=False, fetched_at=datetime.fromtimestamp(
+                            self.globals.wallTime + 1, timezone.utc).isoformat().replace('+00:00', 'Z'),
                         profiles=profiles if profiles is not None else [profile()])
         response.update(extra)
         self.globals.files[RESPONSE] = json.dumps(response)
@@ -695,6 +701,106 @@ class WidgetTests(unittest.TestCase):
                 self.click_text('Early bomber producer')
                 self.assertTrue(any('Completed bombers early' in text for text in self.draw()))
                 self.click_text('Early bomber producer')
+
+
+    def website_status(self):
+        return next(text for text in self.draw() if text.startswith('Website:'))
+
+    def test_website_live_cache_and_age_transitions(self):
+        self.start()
+        self.assertEqual(self.website_status(), 'Website: connecting...')
+        self.respond()
+        self.assertEqual(self.website_status(), 'Website: connected (checked 0s ago)')
+        self.call('Update', 59)
+        self.assertIn('checked 59s ago', self.website_status())
+        self.call('TextCommand', 'barfight')  # Stop active refresh so the age expires.
+        self.call('Update', 241)
+        self.call('TextCommand', 'barfight')
+        self.assertEqual(self.website_status(), 'Website: last check 5m ago')
+        self.call('Update', 1)
+        self.assertEqual(self.website_status(), 'Website: connecting...')
+        self.respond(cached=True)
+        self.assertEqual(self.website_status(), 'Website: cached profiles (not checked)')
+        self.assertIn('Early bomber producer', self.draw())
+
+    def test_website_failure_disabled_and_helper_timeout(self):
+        self.start()
+        self.call('Update', 30)
+        self.assertEqual(self.website_status(), 'Website: no helper reply')
+        self.respond(ok=False, error_code='transport-unavailable', error='Offline')
+        self.assertEqual(self.website_status(), 'Website: unavailable')
+        self.respond(ok=False, error_code='privacy-disabled', error='Disabled')
+        self.assertEqual(self.website_status(), 'Website: profile lookups disabled')
+
+    def test_website_rejects_invalid_or_unrelated_response(self):
+        self.start()
+        self.respond(request_id='other-request')
+        self.assertEqual(self.website_status(), 'Website: connecting...')
+        self.respond([profile(account='999')])
+        self.assertEqual(self.website_status(), 'Website: invalid helper reply')
+        self.globals.files[RESPONSE] = '{invalid'
+        self.call('Update', 1)
+        self.assertEqual(self.website_status(), 'Website: invalid helper reply')
+        self.respond(cached='false')
+        self.assertEqual(self.website_status(), 'Website: invalid helper reply')
+        self.respond(cached=None, fetched_at=None)
+        self.assertEqual(self.website_status(), 'Website: invalid helper reply')
+
+    def test_website_no_data_connected_and_roster_reset_preserves_profiles(self):
+        self.start()
+        self.respond([profile(status='no_data')])
+        self.assertIn('Website: connected', self.website_status())
+        self.add_player(3, 'New player', '300', 1)
+        self.call('Update', 2)
+        self.assertEqual(self.website_status(), 'Website: connecting...')
+        self.assertIn('Early bomber producer', self.draw())
+
+    def test_website_no_attempt_when_map_or_ids_unavailable(self):
+        self.globals.Game.mapName = 'Other map'
+        self.start()
+        self.assertIsNone(self.request())
+        self.assertEqual(self.website_status(), 'Website: not checked (unsupported map)')
+        self.setUp()
+        self.add_player(1, 'One')
+        self.add_player(2, 'Two')
+        self.start()
+        self.assertIsNone(self.request())
+        self.assertEqual(self.website_status(), 'Website: not checked (no account IDs)')
+
+    def test_website_footer_fits_narrow_viewport(self):
+        self.start()
+        self.respond(cached=True)
+        for width in (360, 640, 1280):
+            self.call('ViewResize', width, 720)
+            self.draw()
+            entry = next(e for e in self.globals.drawn.values() if e['text'].startswith('Website:'))
+            end = entry['x'] + len(entry['text']) * .48 * entry['size']
+            self.assertLessEqual(end, width - 20)
+            footer = [e for e in self.globals.drawn.values() if e['y'] == entry['y'] and e['text'] != entry['text']]
+            for other in footer:
+                self.assertGreaterEqual(other['x'], end)
+
+    def test_website_uses_actual_fetch_age_after_suspend(self):
+        self.start()
+        old = datetime.fromtimestamp(self.globals.wallTime, timezone.utc).isoformat().replace('+00:00', 'Z')
+        self.globals.wallTime += 600  # Suspension: wall clock changes without Update.
+        self.respond(fetched_at=old)
+        self.assertEqual(self.website_status(), 'Website: last check 10m ago')
+        self.respond()
+        self.globals.wallTime += 360
+        self.assertEqual(self.website_status(), 'Website: last check 6m ago')
+
+    def test_website_invalid_future_timestamps_and_failure_codes(self):
+        self.start()
+        for stamp in ('2024-02-30T12:00:00Z', '2024-07-03T25:00:00Z',
+                      '2024-07-03T12:00:00+02:00', '2026-10-01T12:00:00Z', 'broken'):
+            self.respond(fetched_at=stamp)
+            self.assertEqual(self.website_status(), 'Website: not checked')
+        for code, label in (('invalid-response', 'invalid service reply'),
+                            ('unexpected-content-type', 'invalid service reply'),
+                            ('stopped', 'helper stopped'), ('timeout', 'request timed out')):
+            self.respond(ok=False, error_code=code)
+            self.assertEqual(self.website_status(), 'Website: ' + label)
 
 
 class WidgetScopeTests(unittest.TestCase):

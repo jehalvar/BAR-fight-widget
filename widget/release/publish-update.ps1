@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Version,
     [string]$KeyPath = (Join-Path $env:LOCALAPPDATA 'BARFightRelease\update-key.dpapi'),
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\dist\updates\widget'),
+    [string]$OutputDirectory,
     [int]$ValidDays = 30
 )
 $ErrorActionPreference = 'Stop'
@@ -9,6 +9,8 @@ if ($Version -notmatch '\A(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9
 if ($ValidDays -lt 1 -or $ValidDays -gt 30) { throw 'Update manifests are valid for 1 to 30 days.' }
 Add-Type -AssemblyName System.Security
 $widgetRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $widgetRoot 'dist\updates\widget' }
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $sources = [ordered]@{
     'BarFightBridge.exe' = (Join-Path $widgetRoot 'build\BarFightBridge.exe')
     'BarFightUpdater.exe' = (Join-Path $widgetRoot 'build\BarFightUpdater.exe')
@@ -58,7 +60,8 @@ try {
     $stream = [IO.FileStream]::new($temporaryPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($manifestBytes, 0, $manifestBytes.Length); $stream.Flush($true) }
     finally { $stream.Dispose() }
-    if (Test-Path -LiteralPath $manifestPath) { [IO.File]::Replace($temporaryPath, $manifestPath, $null) }
+    # Windows PowerShell converts $null to an empty path for a string parameter.
+    if (Test-Path -LiteralPath $manifestPath) { [IO.File]::Replace($temporaryPath, $manifestPath, [System.Management.Automation.Language.NullString]::Value) }
     else { [IO.File]::Move($temporaryPath, $manifestPath) }
     Write-Output ('Prepared authenticated update ' + $Version + ' in ' + $OutputDirectory)
 } finally { $rsa.Dispose() }

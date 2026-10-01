@@ -21,6 +21,7 @@ local MAX_HOVER_TRAITS = 4
 local RETIRED_TRAITS = {consistent_opener = true, early_defence = true, mobile_heavy = true, leaker = true}
 local REFRESH_SECONDS, OFFLINE_SECONDS = 60, 30
 local RECOVERY_REFRESH_SECONDS, ACTIVE_REFRESH_SECONDS = 120, 240
+local CONNECTION_FRESH_SECONDS = 300
 local INSTANCE_TOKEN = tostring({}):gsub("[^a-zA-Z0-9]", "")
 local NULL = {}
 local POSITION_NAMES = {
@@ -183,6 +184,22 @@ local function timestampText(value)
     return ""
 end
 
+-- Convert the helper's UTC ISO timestamp without depending on the host timezone.
+local function fetchedEpoch(value)
+    if type(value) ~= "string" then return nil end
+    local year, month, day, hour, minute, second, suffix = value:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)(.*)$")
+    if not year or not (suffix == "Z" or suffix:match("^%.%d+Z$") or suffix == "+00:00" or suffix:match("^%.%d+%+00:00$")) then return nil end
+    year, month, day, hour, minute, second = tonumber(year), tonumber(month), tonumber(day), tonumber(hour), tonumber(minute), tonumber(second)
+    if year < 1970 or year > 2100 or month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59 then return nil end
+    local function leap(y) return y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0) end
+    local months = {31, leap(year) and 29 or 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+    if day < 1 or day > months[month] then return nil end
+    local days = day - 1
+    for y = 1970, year - 1 do days = days + (leap(y) and 366 or 365) end
+    for m = 1, month - 1 do days = days + months[m] end
+    return days * 86400 + hour * 3600 + minute * 60 + second
+end
+
 local function accountID(value)
     if type(value) == "number" then
         if value < 1 or value > 9007199254740991 or value ~= math.floor(value) then return nil end
@@ -234,6 +251,7 @@ local rosterScroll, traitScroll = 0, 0
 local lastSignature, lastRequestID, lastResponseText = "", nil, nil
 local requestSequence, lastRequestAt, pendingAt, lastSuccessAt = 0, -REFRESH_SECONDS, nil, nil
 local status = "Open BAR Fight to view historical traits."
+local connectionState, checkedAt = "unverified", nil
 local hits, rosterArea, detailArea, panelArea, dragArea = {}, nil, nil, nil, nil
 local hoverKey, hoverSince = nil, 0
 local nativeHover
@@ -250,8 +268,8 @@ local palette = {
 }
 
 local function requestTraits(manual)
-    if not supportedMap() then status = "Traits are available for Supreme Isthmus v2.1."; return false end
-    if #accounts == 0 then status = "No stable player account IDs are available in this match."; return false end
+    if not supportedMap() then lastRequestID, pendingAt, connectionState, checkedAt = nil, nil, "unsupported", nil; status = "Traits are available for Supreme Isthmus v2.1."; return false end
+    if #accounts == 0 then lastRequestID, pendingAt, connectionState, checkedAt = nil, nil, "no_accounts", nil; status = "No stable player account IDs are available in this match."; return false end
     if manual and elapsed - lastRequestAt < REFRESH_SECONDS then return false end
     requestSequence = requestSequence + 1
     local epoch = os and os.time and os.time() or 0
@@ -270,8 +288,9 @@ local function requestTraits(manual)
         if not wrote then error(writeError or "Cannot write request") end
     end)
     lastRequestAt = elapsed
-    if not ok then status = "Cannot write the local request. Check the BAR Fight installation."; return false end
+    if not ok then lastRequestID, pendingAt, connectionState, checkedAt = nil, nil, "local_error", nil; status = "Cannot write the local request. Check the BAR Fight installation."; return false end
     lastRequestID, pendingAt, lastResponseText = requestID, elapsed, nil
+    connectionState, checkedAt = "connecting", nil
     requestedAccounts = {}
     for _, id in ipairs(accounts) do requestedAccounts[id] = true end
     status = "Loading historical traits through the BAR Fight helper..."
@@ -310,7 +329,7 @@ local function refreshRoster()
     for id in pairs(ids) do ordered[#ordered + 1] = id end
     table.sort(ordered, function(a, b) return tonumber(a) < tonumber(b) end)
     if #ordered > MAX_PLAYERS then
-        accounts = {}; status = "This panel supports up to 16 player accounts."; return
+        accounts = {}; lastRequestID, pendingAt, connectionState, checkedAt = nil, nil, "no_accounts", nil; status = "This panel supports up to 16 player accounts."; return
     end
     accounts = ordered
     local signature = (supportedMap() and MAP or "unsupported") .. ":" .. table.concat(accounts, ",")
@@ -373,22 +392,30 @@ local function pollResponse()
     lastResponseText = content
     local ok, response = pcall(decodeJSON, content)
     if not ok or type(response) ~= "table" then
+        connectionState, checkedAt = "invalid", nil
         status = "The helper response was incomplete or invalid; waiting for valid data."; return
     end
     if response.schema ~= 1 or response.request_id ~= lastRequestID then return end
     if response.map ~= nil and response.map ~= MAP then return end
-    if response.ok ~= true then
+    if response.ok == false then
+        local errors = {["privacy-disabled"] = "disabled", ["stopped"] = "stopped", ["timeout"] = "service_timeout",
+            ["invalid-response"] = "service_invalid", ["unexpected-content-type"] = "service_invalid"}
+        connectionState, checkedAt = errors[response.error_code] or "unavailable", nil
         status = "Helper unavailable: " .. (textValue(response.error, 140) ~= "" and textValue(response.error, 140) or "please check the connection.")
         pendingAt = nil
         return
     end
+    if response.ok ~= true or (response.cached ~= nil and type(response.cached) ~= "boolean") then
+        connectionState, checkedAt = "invalid", nil; return
+    end
     if type(response.profiles) ~= "table" or #response.profiles > MAX_PLAYERS then
+        connectionState, checkedAt = "invalid", nil
         status = "The helper returned an unsupported profile response."; return
     end
     local incoming, seen = {}, {}
     for _, raw in ipairs(response.profiles) do
         local profile = validProfile(raw)
-        if not profile or seen[profile.account_id] then status = "The helper returned an invalid player profile."; return end
+        if not profile or seen[profile.account_id] then connectionState, checkedAt = "invalid", nil; status = "The helper returned an invalid player profile."; return end
         seen[profile.account_id] = true
         incoming[profile.account_id] = profile
     end
@@ -415,6 +442,10 @@ local function pollResponse()
         else profiles[id] = profile end
     end
     pendingAt, lastSuccessAt = nil, elapsed
+    local fetched = fetchedEpoch(response.fetched_at)
+    local now = os and os.time and os.time()
+    connectionState = response.cached == true and "cached" or (response.cached == false and fetched and now and fetched <= now and "connected" or "unverified")
+    checkedAt = connectionState == "connected" and fetched or nil
     status = response.cached and "Showing cached historical profiles." or "Historical profiles updated."
 end
 
@@ -448,6 +479,24 @@ local function fit(value, width, size)
         value = value:sub(1, cut - 1)
     end
     return value .. "..."
+end
+
+local function connectionLabel()
+    if connectionState == "connected" and checkedAt then
+        local now = os and os.time and os.time()
+        if not now or now < checkedAt then return "Website: not checked", palette.muted end
+        local age = math.floor(now - checkedAt)
+        local ago = age < 60 and (age .. "s") or (math.floor(age / 60) .. "m")
+        if age < CONNECTION_FRESH_SECONDS then return "Website: connected (checked " .. ago .. " ago)", palette.accent end
+        return "Website: last check " .. ago .. " ago", palette.warning
+    end
+    local labels = {unverified = "Website: not checked", connecting = "Website: connecting...",
+        cached = "Website: cached profiles (not checked)", unavailable = "Website: unavailable",
+        stopped = "Website: helper stopped", service_timeout = "Website: request timed out", service_invalid = "Website: invalid service reply",
+        disabled = "Website: profile lookups disabled", invalid = "Website: invalid helper reply",
+        timeout = "Website: no helper reply", local_error = "Website: local request failed",
+        unsupported = "Website: not checked (unsupported map)", no_accounts = "Website: not checked (no account IDs)"}
+    return labels[connectionState] or labels.unverified, connectionState == "unverified" and palette.muted or palette.warning
 end
 
 local function wrapped(value, width, size)
@@ -723,6 +772,7 @@ function widget:Update(dt)
     if rosterTimer >= 2 then rosterTimer = 0; refreshRoster() end
     if responseTimer >= 1 then responseTimer = 0; pollResponse() end
     if pendingAt and elapsed - pendingAt >= OFFLINE_SECONDS then
+        connectionState, checkedAt = "timeout", nil
         status = "No helper reply yet. Start the BAR Fight helper; cached traits remain available."
     end
     if ((pendingAt ~= nil or hasRecoveringProfile()) and elapsed - lastRequestAt >= RECOVERY_REFRESH_SECONDS)
@@ -771,7 +821,12 @@ function widget:DrawScreen()
     local statusLine = status
     if not supportedMap() then statusLine = "Available on Supreme Isthmus v2.1 only. No live match data is recorded." end
     drawText(fit(statusLine, width - 34, 11), left + 17, top - 69, 11, pendingAt and palette.warning or palette.muted)
-    drawText("Public replay history  |  Mirrored positions combined  |  Scroll either column", left + 17, bottom + 12, 10, palette.muted)
+    local connectionText, connectionColor = connectionLabel()
+    local connectionWidth = math.min(width - 34, 300)
+    drawText(fit(connectionText, connectionWidth, 10), left + 17, bottom + 12, 10, connectionColor)
+    if width > 520 then
+        drawText(fit("Public history | Scroll either column", width - connectionWidth - 51, 10), left + connectionWidth + 34, bottom + 12, 10, palette.muted)
+    end
     if not supportedMap() then gl.Color(1, 1, 1, 1); return end
     local rosterWidth = math.max(160, math.min(222, width * .29))
     local divider = left + rosterWidth

@@ -12,6 +12,8 @@ BAR Fight displays historical player traits from [bar-fight.com](https://bar-fig
 
 Open the panel with the BAR Fight button or `/barfight`, select a player, then select a historical position. Click a trait for its dates, sample sizes, and evidence. Hovering a player's name in the panel or supported built-in player list shows a short summary. Missing accounts, insufficient evidence, and offline results remain distinct states.
 
+The small connection indicator at the bottom of the panel shows recent contact with the website, checks in progress, cached responses and connection problems. It also identifies when the helper has not replied or profile fetching is turned off. Saved profiles are not proof of a live connection, and a successful connection does not mean every player has enough history. The indicator uses existing helper replies and adds no network requests.
+
 ## Privacy controls
 
 The helper sends the supported map name and up to 16 public BAR account IDs over HTTPS to request profiles. It does not read local replay files, record gameplay, or upload replay data. The website also receives the ordinary connection information needed for HTTPS, including the source IP address.
