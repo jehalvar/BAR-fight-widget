@@ -19,7 +19,7 @@ Our application to [SignPath Foundation](https://signpath.org/) is pending. Curr
 Requires Windows 10 or later, .NET Framework 4.x with its C# compiler, PowerShell, and a separately installed [Inno Setup](https://jrsoftware.org/isdl.php). No NuGet packages are needed.
 
 ```powershell
-./widget/build.ps1 -Version 0.1.10 -InnoCompiler 'C:\Path\To\Inno Setup\ISCC.exe'
+./widget/build.ps1 -Version 0.1.11 -InnoCompiler 'C:\Path\To\Inno Setup\ISCC.exe'
 ```
 
 Build output is excluded from Git. Builds without an explicit signing configuration are unsigned. Signing-provider approval, certificate issuance, and publication are separate release steps. The RSA update-manifest signature is distinct from Windows Authenticode signing; the public update-verification key is source-controlled, and no private release key is included.
@@ -39,12 +39,12 @@ The PowerShell checks use temporary installations and do not contact the product
 
 Both compiled Windows components receive metadata from the same generated `WidgetBuild.cs`:
 
-| Field | 0.1.10 value |
+| Field | 0.1.11 value |
 | --- | --- |
 | ProductName | BAR Fight |
-| ProductVersion | 0.1.10 |
-| FileVersion | 0.1.10.0 |
-| AssemblyVersion | 0.1.10.0 |
+| ProductVersion | 0.1.11 |
+| FileVersion | 0.1.11.0 |
+| AssemblyVersion | 0.1.11.0 |
 
 `test_metadata.ps1` compiles the actual helper and updater, reads their PE version resources, verifies all four fields, and runs the helper's offline self-tests. It removes its temporary binaries afterward. The installer uses the same product name and release version.
 

@@ -1,5 +1,5 @@
 # Verifies release metadata on actual compiled helper/updater binaries in a temporary directory.
-param([string]$Version = '0.1.10')
+param([string]$Version = '0.1.11')
 $ErrorActionPreference = 'Stop'
 $widgetRoot = Split-Path $PSScriptRoot
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

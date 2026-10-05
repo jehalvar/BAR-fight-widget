@@ -28,6 +28,30 @@ widget = {}
 WG = {}
 files, written, drawn, rectangles, players, echoes = {}, {}, {}, {}, {}, {}
 clipboard = {}
+-- BAR's handler routes typing exclusively to its text owner, before game
+-- shortcuts. SDL does not emit text events until native input is started.
+textOwner, nativeTextActive, nativeTextStarts, nativeTextStops, gameShortcuts = nil, false, 0, 0, 0
+widgetHandler = {
+    OwnText = function() if textOwner then return false end; textOwner = widget; return true end,
+    DisownText = function() if textOwner ~= widget then return false end; textOwner = nil; return true end,
+}
+function engineTextInput(text)
+    if not nativeTextActive then return false end
+    if textOwner and textOwner.TextInput then return textOwner:TextInput(text) end
+    return false
+end
+function engineKeyPress(key)
+    if textOwner and (not textOwner.KeyPress or textOwner:KeyPress(key, {})) then return true end
+    gameShortcuts = gameShortcuts + 1
+    return false
+end
+function engineKeyRelease(key)
+    if textOwner then
+        if textOwner.KeyRelease then return textOwner:KeyRelease(key, {}) end
+        return true
+    end
+    return false
+end
 Game = {mapName = "Supreme Isthmus v2.1"}
 wallTime = 1720000000
 os = {time = function() return wallTime end, date = os.date}
@@ -60,6 +84,9 @@ Spring = {
     GetMouseState = function() return mouseX or 0, mouseY or 0 end,
     Echo = function(text) echoes[#echoes+1] = text end,
     SetClipboard = function(text) clipboard[#clipboard+1] = text end,
+    SDLStartTextInput = function() nativeTextActive = true; nativeTextStarts = nativeTextStarts + 1 end,
+    SDLStopTextInput = function() nativeTextActive = false; nativeTextStops = nativeTextStops + 1 end,
+    GetPressedKeys = function() return heldKeys or {} end,
 }
 gl = {
     Color = function(r,g,b,a) assert(type(r)=="number" and type(g)=="number" and type(b)=="number" and type(a)=="number") end,
@@ -920,6 +947,73 @@ class WidgetTests(unittest.TestCase):
         self.lua.execute('Spring.IsGUIHidden = function() return true end')
         self.assertFalse(self.call('TextInput', 'game text'))
         self.assertFalse(self.call('KeyPress', 119, self.lua.table()))
+
+    def test_search_receives_native_typing_before_game_shortcuts(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+        self.lua.execute('heldKeys = {[276] = true}')
+        self.assertFalse(self.globals.engineTextInput('Fusion'))
+        self.click_text('Unit: T2 constructors  [Search]')
+        self.assertTrue(self.globals.nativeTextActive)
+        self.assertTrue(self.globals.engineKeyPress(102))
+        self.assertEqual(self.globals.gameShortcuts, 0)
+        self.assertTrue(self.globals.engineTextInput('Fusion'))
+        self.assertIn('Search: Fusion |', self.draw())
+        self.assertNotIn('Advanced Construction Bot [armack]', self.draw())
+        # Re-clicking an already focused field must not clear the query or
+        # attempt to acquire its own text ownership a second time.
+        self.click_text('Search: Fusion |')
+        self.assertEqual(self.globals.nativeTextStarts, 1)
+        self.assertIn('Search: Fusion |', self.draw())
+        self.assertTrue(self.globals.engineKeyRelease(102))
+        self.assertFalse(self.globals.engineKeyRelease(276))
+        self.assertTrue(self.globals.engineKeyPress(13))
+        self.assertEqual(self.timing_request()['unit'], 'armfus')
+        self.assertIsNone(self.globals.textOwner)
+        self.assertFalse(self.globals.nativeTextActive)
+        self.assertEqual(self.globals.nativeTextStops, 1)
+        self.assertFalse(self.globals.engineKeyPress(102))
+        self.assertEqual(self.globals.gameShortcuts, 1)
+
+    def test_search_releases_native_focus_on_every_exit(self):
+        for action in ('escape', 'tab', 'outside', 'traits', 'close', 'command', 'hidden', 'shutdown', 'player'):
+            with self.subTest(action=action):
+                self.setUp(); self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+                self.click_text('Unit: T2 constructors  [Search]')
+                self.assertTrue(self.globals.nativeTextActive)
+                if action in ('escape', 'tab'): self.globals.engineKeyPress(27 if action == 'escape' else 9)
+                elif action == 'outside': self.call('MousePress', 5, 5, 1)
+                elif action == 'traits': self.click_text('Traits')
+                elif action == 'close': self.click_text('X')
+                elif action == 'command': self.call('TextCommand', 'barfight')
+                elif action == 'hidden':
+                    self.lua.execute('Spring.IsGUIHidden = function() return true end')
+                    self.call('Update', .1)
+                elif action == 'shutdown': self.call('Shutdown')
+                elif action == 'player': self.click_text('Other name')
+                self.assertIsNone(self.globals.textOwner)
+                self.assertFalse(self.globals.nativeTextActive)
+                self.assertEqual(self.globals.nativeTextStops, 1)
+                self.assertFalse(self.globals.engineTextInput('game text'))
+
+    def test_search_does_not_take_focus_or_stop_input_owned_by_another_widget(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+        self.lua.execute('otherTextOwner = {}; textOwner = otherTextOwner; nativeTextActive = true')
+        self.click_text('Unit: T2 constructors  [Search]')
+        self.assertIn('Unit: T2 constructors  [Search]', self.draw())
+        self.assertEqual(self.globals.nativeTextStarts, 0)
+        self.call('Shutdown')
+        self.assertTrue(self.lua.eval('textOwner == otherTextOwner'))
+        self.assertTrue(self.globals.nativeTextActive)
+        self.assertEqual(self.globals.nativeTextStops, 0)
+
+    def test_search_blur_preserves_a_new_text_owner(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+        self.click_text('Unit: T2 constructors  [Search]')
+        self.lua.execute('otherTextOwner = {}; textOwner = otherTextOwner')
+        self.click_text('Traits')
+        self.assertTrue(self.lua.eval('textOwner == otherTextOwner'))
+        self.assertTrue(self.globals.nativeTextActive)
+        self.assertEqual(self.globals.nativeTextStops, 0)
 
     def test_timing_switch_player_invalidates_old_copy_and_rejects_late_reply(self):
         self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()

@@ -275,6 +275,29 @@ local palette = {
     warning = {1, 0.77, 0.38, 1}, border = {0.18, 0.28, 0.33, 1},
 }
 
+local searchPressedKeys, searchHeldKeys = {}, {}
+local function setTimingSearchFocus(focused)
+    if focused == timing.searching then return focused end
+    if focused then
+        -- BAR routes owned text before game shortcuts. Merely drawing a cursor
+        -- does not enable SDL text events (chat normally leaves them stopped).
+        if widgetHandler and widgetHandler.OwnText and not widgetHandler:OwnText() then
+            timing.status = "Close the other text field, then click the unit search."
+            return false
+        end
+        timing.searching = true
+        searchPressedKeys = {}
+        searchHeldKeys = Spring.GetPressedKeys and Spring.GetPressedKeys() or {}
+        if Spring.SDLStartTextInput then Spring.SDLStartTextInput() end
+    else
+        timing.searching = false
+        local released = not widgetHandler or not widgetHandler.DisownText or widgetHandler:DisownText()
+        -- Another field may have taken ownership; never stop its native input.
+        if released and Spring.SDLStopTextInput then Spring.SDLStopTextInput() end
+    end
+    return focused
+end
+
 local function requestTraits(manual)
     if not supportedMap() then lastRequestID, pendingAt, connectionState, checkedAt = nil, nil, "unsupported", nil; status = "Traits are available for Supreme Isthmus v2.1."; return false end
     if #accounts == 0 then lastRequestID, pendingAt, connectionState, checkedAt = nil, nil, "no_accounts", nil; status = "No stable player account IDs are available in this match."; return false end
@@ -698,7 +721,8 @@ local function filteredTimingUnits()
 end
 
 local function chooseTimingUnit(item)
-    timing.unit, timing.label, timing.searching, timing.search, timing.scroll, timing.copied = item.id, item.label, false, "", 0, false
+    setTimingSearchFocus(false)
+    timing.unit, timing.label, timing.search, timing.scroll, timing.copied = item.id, item.label, "", 0, false
     requestTiming(false)
 end
 
@@ -941,7 +965,9 @@ local function drawTimings(x1, bottom, x2, top)
     timingSearchArea = {x1, top - 73, x2, top - 46}
     button(x1, top - 73, x2, top - 46,
         timing.searching and ("Search: " .. timing.search .. " |") or ("Unit: " .. timing.label .. "  [Search]"),
-        function() timing.searching, timing.search, timing.scroll = true, "", 0 end, timing.searching)
+        function()
+            if not timing.searching and setTimingSearchFocus(true) then timing.search, timing.scroll = "", 0 end
+        end, timing.searching)
     local profile = timing.signature == timingSignature() and timing.profile or nil
     local history = profile or profiles[row.account_id]
     local positions = history and history.positions or {}
@@ -1020,13 +1046,17 @@ function widget:Initialize()
 end
 
 function widget:Shutdown()
-    dragging, timing.searching = false, false
+    dragging = false
+    setTimingSearchFocus(false)
     if WG.barFightTraitsHover == receiveNativeHover then WG.barFightTraitsHover = nil end
     nativeHover, hoverKey = nil, nil
 end
 
 function widget:Update(dt)
     if type(dt) ~= "number" or dt < 0 then return end
+    if timing.searching and (not open or activeTab ~= "timings" or (Spring.IsGUIHidden and Spring.IsGUIHidden())) then
+        setTimingSearchFocus(false)
+    end
     elapsed, rosterTimer, responseTimer = elapsed + dt, rosterTimer + dt, responseTimer + dt
     if rosterTimer >= 2 then rosterTimer = 0; refreshRoster() end
     if responseTimer >= 1 then responseTimer = 0; pollResponse(); pollTimingResponse() end
@@ -1051,13 +1081,13 @@ function widget:Update(dt)
 end
 
 function widget:DrawScreen()
-    if Spring.IsGUIHidden and Spring.IsGUIHidden() then hoverKey, timing.searching = nil, false; return end
+    if Spring.IsGUIHidden and Spring.IsGUIHidden() then hoverKey = nil; setTimingSearchFocus(false); return end
     hits, rosterArea, detailArea, panelArea, dragArea = {}, nil, nil, nil, nil
     timingSearchArea, timingListArea = nil, nil
     local right, top = vsx - 20, vsy - 90
     button(right - 119, top - 28, right, top, "BAR Fight", function()
         open = not open
-        if not open then dragging, timing.searching = false, false end
+        if not open then dragging = false; setTimingSearchFocus(false) end
     end, open)
     if not open then drawPlayerHover(); gl.Color(1, 1, 1, 1); return end
     local width, height = math.min(820, math.max(1, vsx - 40)), math.min(610, math.max(1, vsy - 140))
@@ -1084,9 +1114,9 @@ function widget:DrawScreen()
     rect(left, top - 49, right, top, palette.surface)
     drawText("BAR FIGHT", left + 17, top - 24, 18, palette.accent)
     if width >= 600 then
-        button(left + 142, top - 37, left + 210, top - 11, "Traits", function() activeTab, timing.searching = "traits", false end, activeTab == "traits")
+        button(left + 142, top - 37, left + 210, top - 11, "Traits", function() activeTab = "traits"; setTimingSearchFocus(false) end, activeTab == "traits")
         button(left + 218, top - 37, left + 315, top - 11, "Build timings", function()
-            activeTab, timing.searching = "timings", false
+            activeTab = "timings"; setTimingSearchFocus(false)
             if timing.signature ~= timingSignature() then requestTiming(false) end
         end, activeTab == "timings")
     end
@@ -1094,7 +1124,7 @@ function widget:DrawScreen()
     local remaining = math.max(0, math.ceil(REFRESH_SECONDS - (elapsed - refreshedAt)))
     button(right - 146, top - 37, right - 45, top - 11, remaining > 0 and ("Refresh " .. remaining .. "s") or "Refresh",
         function() if activeTab == "timings" then requestTiming(true) else requestTraits(true) end end)
-    button(right - 38, top - 37, right - 10, top - 11, "X", function() open, dragging, timing.searching = false, false, false end)
+    button(right - 38, top - 37, right - 10, top - 11, "X", function() open, dragging = false, false; setTimingSearchFocus(false) end)
     local statusLine = activeTab == "timings" and timing.status or status
     if not supportedMap() then statusLine = "Available on Supreme Isthmus v2.1 only. No live match data is recorded." end
     drawText(fit(statusLine, width - 34, 11), left + 17, top - 69, 11, pendingAt and palette.warning or palette.muted)
@@ -1120,7 +1150,7 @@ function widget:DrawScreen()
         button(left + 8, y, divider - 7, y + 30, row.name,
             function()
                 selectedPlayer, selectedSpot, expandedTrait, traitScroll = row.player_id, nil, nil, 0
-                timing.searching = false
+                setTimingSearchFocus(false)
                 if activeTab == "timings" then requestTiming(false) end
             end, selectedPlayer == row.player_id)
         hits[#hits].player = row
@@ -1132,9 +1162,9 @@ function widget:DrawScreen()
     local detailsTop = top - 84
     if width < 600 then
         local middle = (divider + right) / 2
-        button(divider + 8, detailsTop - 28, middle - 4, detailsTop - 2, "Traits", function() activeTab, timing.searching = "traits", false end, activeTab == "traits")
+        button(divider + 8, detailsTop - 28, middle - 4, detailsTop - 2, "Traits", function() activeTab = "traits"; setTimingSearchFocus(false) end, activeTab == "traits")
         button(middle + 4, detailsTop - 28, right - 8, detailsTop - 2, "Build timings", function()
-            activeTab, timing.searching = "timings", false; if timing.signature ~= timingSignature() then requestTiming(false) end
+            activeTab = "timings"; setTimingSearchFocus(false); if timing.signature ~= timingSignature() then requestTiming(false) end
         end, activeTab == "timings")
         detailsTop = detailsTop - 32
     end
@@ -1146,7 +1176,7 @@ end
 
 function widget:MousePress(x, y, buttonNumber)
     if Spring.IsGUIHidden and Spring.IsGUIHidden() then return false end
-    if timing.searching and not inside(x, y, timingSearchArea) and not inside(x, y, timingListArea) then timing.searching = false end
+    if timing.searching and not inside(x, y, timingSearchArea) and not inside(x, y, timingListArea) then setTimingSearchFocus(false) end
     if buttonNumber ~= 1 then return open and inside(x, y, panelArea) or false end
     for index = #hits, 1, -1 do if inside(x, y, hits[index]) then hits[index].action(); return true end end
     if open and dragArea and inside(x, y, dragArea) then
@@ -1206,18 +1236,19 @@ function widget:GetTooltip(x, y)
 end
 
 function widget:TextCommand(command)
-    if command == "barfight" then open = not open; if not open then dragging, timing.searching = false, false end; return true end
+    if command == "barfight" then open = not open; if not open then dragging = false; setTimingSearchFocus(false) end; return true end
     if command == "barfight refresh" then if activeTab == "timings" then requestTiming(true) else requestTraits(true) end; return true end
     local unit = command:match("^barfight timing%s+(.+)$")
     if command == "barfight timing" or unit then
-        open, activeTab, timing.searching = true, "timings", false
+        open, activeTab = true, "timings"
+        setTimingSearchFocus(false)
         if unit then
             unit = textValue(unit, 100):lower()
             local chosen
             for _, item in ipairs(timing.units) do if item.id == unit or item.label:lower() == unit then chosen = item; break end end
             if chosen then chooseTimingUnit(chosen)
             elseif timingUnitID(unit) then chooseTimingUnit({id = unit, label = unit})
-            else timing.search, timing.searching, timing.scroll = unit, true, 0 end
+            else timing.search, timing.scroll = unit, 0; setTimingSearchFocus(true) end
         end
         if timing.signature ~= timingSignature() then requestTiming(false) end
         return true
@@ -1235,7 +1266,8 @@ end
 function widget:KeyPress(key, modifiers)
     if not open or activeTab ~= "timings" or not timing.searching
         or (Spring.IsGUIHidden and Spring.IsGUIHidden()) then return false end
-    if key == 27 then timing.searching = false; return true end
+    searchPressedKeys[key] = true
+    if key == 27 then setTimingSearchFocus(false); return true end
     if key == 8 then
         local cut = #timing.search
         while cut > 0 and timing.search:byte(cut) >= 128 and timing.search:byte(cut) <= 191 do cut = cut - 1 end
@@ -1243,10 +1275,17 @@ function widget:KeyPress(key, modifiers)
         return true
     end
     if key == 13 then local matches = filteredTimingUnits(); if matches[timing.scroll + 1] then chooseTimingUnit(matches[timing.scroll + 1]) end; return true end
-    if key == 9 then timing.searching = false; return true end
+    if key == 9 then setTimingSearchFocus(false); return true end
     if key == 273 or key == 274 then timing.scroll = math.max(0, timing.scroll + (key == 273 and -1 or 1)); return true end
     -- Suppress game bindings only while this explicit search field has focus.
     return true
+end
+
+function widget:KeyRelease(key)
+    -- Let a camera/movement key held before focusing the field finish normally.
+    if searchHeldKeys[key] then searchHeldKeys[key] = nil; searchPressedKeys[key] = nil; return false end
+    if searchPressedKeys[key] then searchPressedKeys[key] = nil; return true end
+    return timing.searching
 end
 
 function widget:ViewResize(x, y)

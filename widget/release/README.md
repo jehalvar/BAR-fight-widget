@@ -1,17 +1,19 @@
 # BAR Fight client release process
 
-The current source version is 0.1.10. Building locally does not upload a release or change the live update feed.
+The current source version is 0.1.11. Building locally does not upload a release or change the live update feed.
+
+The 0.1.11 search keyboard fix claims BAR keyboard focus and activates native text input.
 
 ## Build and metadata
 
 From the repository root, run:
 
 ```powershell
-./widget/build.ps1 -Version 0.1.10 -InnoCompiler 'C:\Path\To\Inno Setup\ISCC.exe'
-./widget/tests/test_metadata.ps1 -Version 0.1.10
+./widget/build.ps1 -Version 0.1.11 -InnoCompiler 'C:\Path\To\Inno Setup\ISCC.exe'
+./widget/tests/test_metadata.ps1 -Version 0.1.11
 ```
 
-`write-build-metadata.ps1` generates one metadata source consumed by both Windows components. Their ProductName is `BAR Fight`, ProductVersion is `0.1.10`, and FileVersion and AssemblyVersion are `0.1.10.0`. The installer uses the same product name and release version. The metadata test verifies real compiled executables, runs the helper's offline tests, then removes its temporary output.
+`write-build-metadata.ps1` generates one metadata source consumed by both Windows components. Their ProductName is `BAR Fight`, ProductVersion is `0.1.11`, and FileVersion and AssemblyVersion are `0.1.11.0`. The installer uses the same product name and release version. The metadata test verifies real compiled executables, runs the helper's offline tests, then removes its temporary output.
 
 Builds are unsigned unless a verified signing configuration is supplied. `sign-binary.ps1` supports the provider configurations documented by the example JSON files. They contain placeholders, not credentials. SignPath onboarding and approval do not themselves configure this script or sign an artifact; the approved signing workflow must be connected explicitly before declaring a release publisher-signed.
 

@@ -1,4 +1,4 @@
-param([string]$Version = '0.1.10')
+param([string]$Version = '0.1.11')
 $ErrorActionPreference = 'Stop'
 $setup = Join-Path $PSScriptRoot "dist\BAR-Fight-Setup-$Version.exe"
 if (-not (Test-Path -LiteralPath $setup)) { throw 'Build the installer first.' }
