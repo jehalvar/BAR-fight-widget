@@ -38,6 +38,8 @@ On standard human 8v8 Supreme Isthmus v2.1 matches, the widget selects the neare
 
 Click the position or faction control to change it, or return to automatic selection. Manual choices last for this widget session and player/team. If a start is unavailable, the most-played historical position is labelled **history**, not **auto**. **All factions** restores every standard unit choice. The faction filter narrows the selected units (including group members), not which historical games are included.
 
+Quick choices, the selected unit and search results show unit pictures from the installed game. Group choices show a representative unit for the selected faction (Armada for All factions); the group still includes all its matching units. Hover a choice to see its full label and group note. Missing pictures use a small question mark. No images are downloaded or bundled with the widget.
+
 **Copy timing** copies the current result, for example:
 `Example player - Tech - T2 constructors - 4:42`.
 The value is the average, rounded to the nearest second. Nothing is posted to chat

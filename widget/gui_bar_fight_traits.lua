@@ -47,6 +47,38 @@ local QUICK_TIMINGS = {
     air = {{"First Fusion", "group:fusion"}, {"First bomber", "group:conventional-bomber"}, {"First fighter", "group:fighter"}},
 }
 local QUICK_ROLES = {P1 = "sea", P2 = "tech", P3 = "air", P5 = "front", P6 = "front", P7 = "geo", P8 = "sea"}
+-- Display representatives only; group membership and timing calculations stay
+-- server-side. Columns are Armada, Cortex, Legion. Use the installed game's
+-- unit pictures, never a file path or image URL supplied by a server response.
+local GROUP_ICONS = {
+    ["group:wind"] = {"armwin", "corwin", "legwin"},
+    ["group:mex"] = {"armmex", "cormex", "legmex"},
+    ["group:advanced-mex"] = {"armmoho", "cormoho", "legmoho"},
+    ["group:solar"] = {"armsolar", "corsolar", "legsolar"},
+    ["group:advanced-solar"] = {"armadvsol", "coradvsol", "legadvsol"},
+    ["group:tidal"] = {"armtide", "cortide", "legtide"},
+    ["group:fusion"] = {"armfus", "corfus", "legfus"},
+    ["group:naval-fusion"] = {"armuwfus", "coruwfus", "leganavalfusion"},
+    ["group:advanced-fusion"] = {"armafus", "corafus", "legafus"},
+    ["group:geo"] = {"armgeo", "corgeo", "leggeo"},
+    ["group:advanced-geo"] = {"armageo", "corageo", "legageo"},
+    ["group:converter"] = {"armmakr", "cormakr", "legeconv"},
+    ["group:advanced-converter"] = {"armmmkr", "cormmkr", "legadveconv"},
+    ["group:energy-storage"] = {"armestor", "corestor", "legestor"},
+    ["group:metal-storage"] = {"armmstor", "cormstor", "legmstor"},
+    ["group:advanced-energy-storage"] = {"armuwadves", "coruwadves", "legadvestore"},
+    ["group:advanced-metal-storage"] = {"armuwadvms", "coruwadvms", "legamstor"},
+    ["group:t1-constructor"] = {"armck", "corck", "legck"},
+    ["group:t2-constructor"] = {"armack", "corack", "legack"},
+    ["group:construction-turret"] = {"armnanotc", "cornanotc", "legnanotc"},
+    ["group:advanced-construction-turret"] = {"armnanotct2", "cornanotct2", "legnanotct2"},
+    ["group:combat-sub"] = {"armsub", "corsub", "legnavysub"},
+    ["group:t1-shipyard"] = {"armsy", "corsy", "legsy"},
+    ["group:destroyer"] = {"armroy", "corroy", "legnavydestro"},
+    ["group:t1-factory"] = {"armlab", "corlab", "leglab"},
+    ["group:conventional-bomber"] = {"armthund", "corshad", "legphoenix"},
+    ["group:fighter"] = {"armfig", "corveng", "legfig"},
+}
 local ID_KEYS = {
     "user_id", "userid", "userID", "account_id", "accountid", "accountID",
     "teiserver_user_id", "teiserverUserId", "chobbyUserId",
@@ -643,10 +675,43 @@ local function inside(x, y, area)
     return area and x >= area[1] and x <= area[3] and y >= area[2] and y <= area[4]
 end
 
-local function button(x1, y1, x2, y2, label, action, selected)
+local function drawTimingIcon(item, x, y, size)
+    local code = item.id
+    if item.kind == "group" then
+        local base = item.base_id or item.id:gsub("%-armada$", ""):gsub("%-cortex$", ""):gsub("%-legion$", "")
+        local representatives = GROUP_ICONS[base]
+        local faction = item.faction or item.id:match("%-(armada)$") or item.id:match("%-(cortex)$") or item.id:match("%-(legion)$")
+        code = representatives and representatives[faction == "cortex" and 2 or faction == "legion" and 3 or 1]
+    end
+    local definition = code and UnitDefNames and UnitDefNames[code]
+    local id = definition and definition.id
+    local painted = false
+    if type(id) == "number" and id > 0 and id < math.huge and id == math.floor(id) and gl.Texture and gl.TexRect then
+        gl.Color(1, 1, 1, 1)
+        if gl.Texture("#" .. id) then
+            gl.TexRect(x, y, x + size, y + size)
+            painted = true
+        end
+        -- Texture state must not leak into labels, panels or other widgets.
+        gl.Texture(false)
+    end
+    if not painted then
+        rect(x, y, x + size, y + size, palette.border)
+        drawText("?", x + size / 2, y + (size - 12) / 2 + 2, 12, palette.muted, "co")
+    end
+end
+
+local function button(x1, y1, x2, y2, label, action, selected, unit)
     rect(x1, y1, x2, y2, selected and palette.selected or palette.surface)
-    drawText(fit(label, x2 - x1 - 14, 12), x1 + 7, y1 + (y2 - y1 - 12) / 2 + 2, 12, selected and palette.accent or palette.text)
-    hits[#hits + 1] = {x1, y1, x2, y2, action = action}
+    local inset = 7
+    if unit then
+        local size = math.min(26, y2 - y1 - 4)
+        drawTimingIcon(unit, x1 + 3, y1 + (y2 - y1 - size) / 2, size)
+        inset = size + 9
+    end
+    drawText(fit(label, x2 - x1 - inset - 7, 12), x1 + inset, y1 + (y2 - y1 - 12) / 2 + 2, 12, selected and palette.accent or palette.text)
+    local tooltip = unit and (label .. (unit.kind == "group" and "\nExample unit icon. Timing includes all units in this group." or ""))
+    hits[#hits + 1] = {x1, y1, x2, y2, action = action, tooltip = tooltip}
 end
 
 local function selectedRow()
@@ -1140,16 +1205,20 @@ local function drawTimings(x1, bottom, x2, top)
     for index, preset in ipairs(quick) do
         local column, line = (index - 1) % columns, math.floor((index - 1) / columns)
         local bx, by = x1 + column * (width + 6), top - 121 - line * 29
-        button(bx, by, bx + width, by + 25, preset.label, function() chooseTimingUnit(preset.unit) end, timing.unit == preset.unit.id)
+        button(bx, by, bx + width, by + 25, preset.label, function() chooseTimingUnit(preset.unit) end, timing.unit == preset.unit.id, preset.unit)
     end
     if #quick == 0 then drawText(fit("Use unit search for more choices.", x2-x1, 11), x1, top - 116, 11, palette.muted) end
     local searchTop = top - 104 - rows * 29
     timingSearchArea = {x1, searchTop - 27, x2, searchTop}
+    local selectedUnit
+    if not timing.searching then
+        for _, item in ipairs(timing.units) do if item.id == timing.unit then selectedUnit = item; break end end
+    end
     button(x1, searchTop - 27, x2, searchTop,
         timing.searching and ("Search: " .. timing.search .. " |") or ("Unit: " .. timing.label .. "  [Search]"),
         function()
             if not timing.searching and setTimingSearchFocus(true) then timing.search, timing.scroll = "", 0 end
-        end, timing.searching)
+        end, timing.searching, selectedUnit)
     local y = searchTop - 45
     local function line(value, offset, size, color)
         if y - offset >= bottom then drawText(fit(value, x2 - x1, size), x1, y - offset, size, color or palette.muted) end
@@ -1196,7 +1265,7 @@ local function drawTimings(x1, bottom, x2, top)
         for index = timing.scroll + 1, math.min(#matches, timing.scroll + capacity) do
             local item, itemTop = matches[index], listTop - (index - timing.scroll - 1) * 27
             button(x1 + 2, itemTop - 25, x2 - 2, itemTop, item.label .. (item.kind == "group" and " (group)" or (" [" .. item.id .. "]")),
-                function() chooseTimingUnit(item) end, item.id == timing.unit)
+                function() chooseTimingUnit(item) end, item.id == timing.unit, item)
         end
         drawText(fit(#matches .. " matches | Scroll to browse | Enter selects top | Esc closes", x2 - x1 - 16, 10),
             x1 + 8, listBottom + 6, 10, palette.muted)
