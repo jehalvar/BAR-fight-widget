@@ -503,7 +503,7 @@ local function validProfile(raw)
     if not id or not requestedAccounts[id] then return nil end
     local profile = {account_id = id, name = textValue(raw.name, 80), status = textValue(raw.status, 48),
         preparing = raw.preparing == true, preparation_note = textValue(raw.preparation_note, 160),
-        generated_at = timestampText(raw.generated_at), stale = raw.stale == true, positions = {}}
+        generated_at = timestampText(raw.generated_at), stale = raw.stale == true, positions = {}, roleHistory = {}}
     local period = type(raw.period) == "table" and raw.period or {}
     profile.period = {start_date = textValue(period.start_date, 10), end_date = textValue(period.end_date, 10)}
     if type(raw.positions) ~= "table" or #raw.positions > 8 then return nil end
@@ -535,6 +535,9 @@ local function validProfile(raw)
             end
         end
         profile.positions[#profile.positions + 1] = clean
+        -- Keep the complete account snapshot apart from the trait fallback below,
+        -- which may retain older per-position counts while evidence is prepared.
+        profile.roleHistory[#profile.roleHistory + 1] = {spot = clean.spot, games = clean.games}
     end
     table.sort(profile.positions, function(a, b) return a.spot < b.spot end)
     return profile
@@ -578,6 +581,7 @@ local function pollResponse()
         incoming[profile.account_id] = profile
     end
     for id, profile in pairs(incoming) do
+        profile.cached = response.cached == true
         local previous = profiles[id]
         if previous then
             for _, position in ipairs(profile.positions) do
@@ -948,6 +952,64 @@ local function copyProfileLink(account)
     if Spring.Echo then Spring.Echo("[BAR Fight] " .. url) end
 end
 
+local function rosterRole(row)
+    if row.startSpot then
+        return POSITION_NAMES[row.startSpot] .. " (detected)", palette.accent,
+            {"Starting position detected from this game's start."}
+    end
+    if not row.account_id then return "Unknown spot", palette.muted, {"No stable account ID for a history estimate."} end
+    local profile = profiles[row.account_id]
+    if not profile then return "Loading history...", palette.muted, {"Waiting for this player's recorded positions."} end
+    local total, most, leaders = 0, 0, {}
+    for _, position in ipairs(profile.roleHistory or profile.positions) do
+        total = total + position.games
+        if position.games > most then
+            most, leaders = position.games, {POSITION_NAMES[position.spot]}
+        elseif position.games == most and most > 0 then
+            leaders[#leaders + 1] = POSITION_NAMES[position.spot]
+        end
+    end
+    if total == 0 then
+        return (profile.preparing or profile.status == "preparing") and "Loading history..." or "No role history",
+            palette.muted, {"No recorded position games are available yet."}
+    end
+    local share = percent(100 * most / total)
+    local tied = #leaders > 1
+    local label = tied and "Mixed spots (est.)" or (leaders[1] .. " " .. share .. " est.")
+    local saved = profile.stale or profile.cached
+    if saved then label = label .. "*" end
+    local details = {
+        tied and ("Tied most-played spots: " .. table.concat(leaders, ", ")) or ("Most-played spot: " .. leaders[1]),
+        share .. (tied and " each" or "") .. " of " .. total .. (total == 1 and " recorded position game." or " recorded position games."),
+        "Past frequency, not a guaranteed choice for this match.",
+    }
+    if profile.period.start_date ~= "" and profile.period.end_date ~= "" then
+        details[#details + 1] = profile.period.start_date .. " to " .. profile.period.end_date .. " UTC"
+    end
+    if total < 5 then details[#details + 1] = "Small history: fewer than five recorded position games." end
+    if saved then details[#details + 1] = "* Saved history; a newer snapshot may change the estimate." end
+    return label, saved and palette.warning or palette.muted, details
+end
+
+local function rosterButton(x1, y1, x2, y2, row, action, selected)
+    rect(x1, y1, x2, y2, selected and palette.selected or palette.surface)
+    local label, color = rosterRole(row)
+    local suffix = " - " .. label
+    local width = x2 - x1 - 38 -- reserve the team marker at the right
+    local nameWidth = gl.GetTextWidth and gl.GetTextWidth(row.name) * 12 or #row.name * 6
+    local suffixWidth = gl.GetTextWidth and gl.GetTextWidth(suffix) * 10 or #suffix * 5
+    if nameWidth + suffixWidth <= width then
+        drawText(row.name, x1 + 7, y1 + 12, 12, selected and palette.accent or palette.text)
+        drawText(suffix, x1 + 7 + nameWidth, y1 + 12, 10, color)
+    else
+        -- Long names and roles use the existing row's second line instead of
+        -- shrinking names or hiding the estimate. The whole row stays clickable.
+        drawText(fit(row.name, x2 - x1 - 14, 12), x1 + 7, y1 + 17, 12, selected and palette.accent or palette.text)
+        drawText(fit(label, width, 10), x1 + 7, y1 + 3, 10, color)
+    end
+    hits[#hits + 1] = {x1, y1, x2, y2, action = action, player = row}
+end
+
 local function hoverPosition(profile, row)
     local best
     for _, position in ipairs(profile.positions) do
@@ -965,6 +1027,13 @@ local function drawHoverCard(row, anchorX, anchorY, source, nameArea)
             frequency = frequency}
     end
     add(row.name, 16, palette.text)
+    if source == "roster" then
+        local label, color, details = rosterRole(row)
+        add(label, 12, color)
+        for _, detail in ipairs(details) do
+            for _, part in ipairs(wrapped(detail, width - 24, 10)) do add(part, 10) end
+        end
+    end
     add("BAR Fight - historical traits", 11, palette.accent)
     local profile = row.account_id and profiles[row.account_id]
     if not row.account_id then
@@ -1412,14 +1481,13 @@ function widget:DrawScreen()
     for _, row in ipairs(roster) do if not allies[row.ally] then allies[row.ally] = nextAlly; nextAlly = nextAlly + 1 end end
     for index = rosterScroll + 1, math.min(#roster, rosterScroll + capacity) do
         local row, y = roster[index], listTop - (index - rosterScroll) * 34
-        button(left + 8, y, divider - 7, y + 30, row.name,
+        rosterButton(left + 8, y, divider - 7, y + 30, row,
             function()
                 selectedPlayer, selectedSpot, expandedTrait, traitScroll = row.player_id, selectionFor(row).spot or row.startSpot, nil, 0
                 timingMenu = nil
                 setTimingSearchFocus(false)
                 if activeTab == "timings" then requestTiming(false) end
             end, selectedPlayer == row.player_id)
-        hits[#hits].player = row
         local red, green, blue
         if Spring.GetTeamColor then red, green, blue = Spring.GetTeamColor(row.team) end
         rect(left + 9, y + 1, left + 12, y + 29, red and {red, green, blue, 1} or palette.accent)

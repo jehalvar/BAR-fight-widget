@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from test_widget import WidgetTests, timing_profile, quick_catalogue
+from test_widget import WidgetTests, profile, timing_profile, quick_catalogue
 
 
 def render(unit_images=None, output=None):
@@ -14,6 +14,15 @@ def render(unit_images=None, output=None):
     for index in range(2, 17):
         case.add_player(index, f'Player {index:02}', str(index * 100), 0 if index <= 8 else 1)
     case.start()
+    histories = []
+    for index in range(1, 17):
+        history = profile(str(index * 100))
+        position = history['positions'][0]
+        history['positions'] = [dict(position, spot='P2' if index % 2 else 'P8', games=21, traits=[]),
+                                dict(position, spot='P3', games=9, traits=[])]
+        history['period'] = dict(start_date='2026-09-06', end_date='2026-10-05')
+        histories.append(history)
+    case.respond(histories)
     case.call('ViewResize', 1280, 900)
     case.call('TextCommand', 'barfight timing')
     value = timing_profile()

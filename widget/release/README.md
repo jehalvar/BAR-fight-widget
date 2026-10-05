@@ -1,19 +1,19 @@
 # BAR Fight client release process
 
-The current source version is 0.1.14. Building locally does not upload a release or change the live update feed.
+The current source version is 0.1.15. Building locally does not upload a release or change the live update feed.
 
-The 0.1.14 release simplifies the timing panel: average ready time and the number of games used appear together. Account metadata, median, occurrence, coverage and date rows are removed. Loading and stale-result notices remain visible.
+The 0.1.15 release adds recorded-position estimates beside player names in the BAR Fight roster. The estimate changes to the detected starting position when BAR exposes it. Hover for the history count and dates; ties and saved history stay explicit.
 
 ## Build and metadata
 
 From the repository root, run:
 
 ```powershell
-./widget/build.ps1 -Version 0.1.14 -InnoCompiler 'C:\Path\To\Inno Setup\ISCC.exe'
-./widget/tests/test_metadata.ps1 -Version 0.1.14
+./widget/build.ps1 -Version 0.1.15 -InnoCompiler 'C:\Path\To\Inno Setup\ISCC.exe'
+./widget/tests/test_metadata.ps1 -Version 0.1.15
 ```
 
-`write-build-metadata.ps1` generates one metadata source consumed by both Windows components. Their ProductName is `BAR Fight`, ProductVersion is `0.1.14`, and FileVersion and AssemblyVersion are `0.1.14.0`. The installer uses the same product name and release version. The metadata test verifies real compiled executables, runs the helper's offline tests, then removes its temporary output.
+`write-build-metadata.ps1` generates one metadata source consumed by both Windows components. Their ProductName is `BAR Fight`, ProductVersion is `0.1.15`, and FileVersion and AssemblyVersion are `0.1.15.0`. The installer uses the same product name and release version. The metadata test verifies real compiled executables, runs the helper's offline tests, then removes its temporary output.
 
 Builds are unsigned unless a verified signing configuration is supplied. `sign-binary.ps1` supports the provider configurations documented by the example JSON files. They contain placeholders, not credentials. SignPath onboarding and approval do not themselves configure this script or sign an artifact; the approved signing workflow must be connected explicitly before declaring a release publisher-signed.
 

@@ -1,6 +1,6 @@
 # BAR Fight Traits for Windows
 
-BAR Fight displays historical player traits from [bar-fight.com](https://bar-fight.com/), matched by stable BAR account ID. The current supported match format is standard human 8v8 on Supreme Isthmus v2.1. Historical habits describe recorded behaviour, not skill or a prediction about the current match.
+BAR Fight displays historical player traits from [bar-fight.com](https://bar-fight.com/), matched by stable BAR account ID. The current supported match format is standard human 8v8 on Supreme Isthmus v2.1. Traits describe recorded behaviour, not skill. Starting-position estimates summarise past choices and may differ from the current match.
 
 ## Install
 
@@ -13,6 +13,12 @@ BAR Fight displays historical player traits from [bar-fight.com](https://bar-fig
 Open the panel with the BAR Fight button or `/barfight`, select a player, then select a historical position. Click a trait for its dates, sample sizes, and evidence. Hovering a player's name in the panel or supported built-in player list shows a short summary. Missing accounts, insufficient evidence, and offline results remain distinct states.
 
 The small connection indicator at the bottom of the panel shows recent contact with the website, checks in progress, cached responses and connection problems. It also identifies when the helper has not replied or profile fetching is turned off. Saved profiles are not proof of a live connection, and a successful connection does not mean every player has enough history. The indicator uses existing helper replies and adds no network requests.
+
+## Starting-position estimates
+
+The BAR Fight panel player list shows a recent-history estimate such as **fanboi - Tech 70% est.** The percentage is games in the most-played spot divided by all available games with a verified position in the profile's last 30 UTC calendar days. Mirrored starts are combined. Games count even when their trait measurements are still being prepared. This is an observed frequency, not a calibrated probability; it does not adjust for teammates' picks.
+
+Once BAR exposes a valid starting position, the estimate becomes **Tech (detected)**. Hidden or ambiguous starts keep the history estimate. Manually changing the historical position you inspect does not change the detected spot in the roster. Hover a row for the date interval, number of games, tied spots and small-sample note. Ties show **Mixed spots**; an asterisk marks saved or stale history. Missing histories stay unknown. Long names use a second line for the role. This adds no network requests.
 
 ## Unit ready times
 
