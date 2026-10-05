@@ -1173,7 +1173,8 @@ local function drawTimings(x1, bottom, x2, top)
     if not row.account_id then
         drawText(fit("No stable account ID supplied by this match.", x2 - x1, 12), x1, top - 48, 12, palette.warning); return
     end
-    drawText("Account " .. row.account_id .. " | Historical build timings", x1, top - 40, 11, palette.muted)
+    -- Keep the player name and controls together without an account metadata row.
+    top = top + 18
     local profile = timing.signature == timingSignature() and timing.profile or nil
     local history = profile or profiles[row.account_id]
     local positions = history and history.positions or {}
@@ -1227,24 +1228,26 @@ local function drawTimings(x1, bottom, x2, top)
     if profile and position then
         local available = profile.status == "available" and position.status == "available"
         line("Average first ready time - from game start", 0, 12)
-        line(available and readyTime(position.mean_seconds) or "Not measured", 34, 30, available and palette.accent or palette.muted)
-        line(available and ("Median " .. readyTime(position.median_seconds) .. " | Recorded history, not a build deadline")
-            or (position.status == "preparing" and "History is being prepared. Refresh in a minute."
+        local result = available and (readyTime(position.mean_seconds) .. " / " .. position.samples
+            .. (position.samples == 1 and " game" or " games")) or "Not measured"
+        line(result, 34, 30, available and palette.accent or palette.muted)
+        local nextOffset = 54
+        if not available then
+            line(position.status == "preparing" and "History is being prepared. Refresh in a minute."
             or position.status == "not_observed" and "No first-ready event observed in the measured games."
-            or "This unit timing is not measured for the selected position."), 55, 11)
-        line("Sample: " .. position.samples .. " first-ready games | Occurrence: " .. (percent(position.occurrence_percent) or "Unknown"), 74, 11)
-        line("Coverage: " .. percent(position.coverage_percent) .. " of selected games", 91, 11)
-        local period = profile.period.start_date ~= "" and (profile.period.start_date .. " to " .. profile.period.end_date .. " UTC") or "Historical dates unavailable"
-        line(period, 108, 11)
-        line((profile.generated_at ~= "" and ("Updated " .. profile.generated_at) or "Update date unavailable")
-            .. (profile.stale and " | Stale cache" or timing.cached and " | Helper cache" or ""), 125, 10,
-            (profile.stale or timing.cached) and palette.warning or palette.muted)
-        if available and y - 162 >= bottom then
-            button(x1, y - 162, x2, y - 136, timing.copied and "Copied timing" or "Copy timing", copyTiming)
-        else line("Copy timing unavailable for this result", 153, 11) end
+            or "This unit timing is not measured for the selected position.", 55, 11)
+            nextOffset = 75
+        elseif profile.stale or timing.cached then
+            line(profile.stale and "Stale cache - showing saved timings." or "Helper cache - showing saved timings.", 55, 11, palette.warning)
+            nextOffset = 75
+        end
+        if available and y - nextOffset - 26 >= bottom then
+            button(x1, y - nextOffset - 26, x2, y - nextOffset, timing.copied and "Copied timing" or "Copy timing", copyTiming)
+            nextOffset = nextOffset + 44
+        end
         local notes = (position.preparing and "More history is being prepared. " or "")
             .. "Averages use games reaching first ready. Includes unfinished handovers; attributed to the creator."
-        for index, text in ipairs(wrapped(notes, x2 - x1, 10)) do line(text, 180 + (index - 1) * 14, 10) end
+        for index, text in ipairs(wrapped(notes, x2 - x1, 10)) do line(text, nextOffset + (index - 1) * 14, 10) end
     else
         line(timing.pendingAt and "Loading this player's build timings..." or profile and "No timing history for the selected position."
             or "No historical build timing is available yet.", 12, 12)

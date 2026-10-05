@@ -1018,14 +1018,18 @@ class WidgetTests(unittest.TestCase):
         self.assertRegex(request['request_id'], r'^[A-Za-z0-9_-]{1,80}$')
         self.timing_respond()
         texts = self.draw()
-        self.assertIn('4:42', texts)
-        self.assertTrue(any('Median 4:30' in text for text in texts))
-        self.assertIn('Sample: 18 first-ready games | Occurrence: 75%', texts)
-        self.assertIn('Coverage: 80% of selected games', texts)
-        self.assertTrue(any('2026-09-06 to 2026-10-05' in text for text in texts))
+        # The count is the 18 measured first-ready events, not the 30 selected
+        # games or the 24 games with coverage.
+        self.assertIn('4:42 / 18 games', texts)
+        self.assertFalse(any(text.startswith(('Account ', 'Median ', 'Sample:', 'Coverage:', 'Updated ')) for text in texts))
+        self.assertFalse(any('2026-09-06 to 2026-10-05' in text for text in texts))
         self.assertEqual(len(self.globals.clipboard), 0)
         self.click_text('Copy timing')
         self.assertEqual(list(self.globals.clipboard.values()), ['Current name - Tech - T2 constructors - 4:42'])
+        value = timing_profile()
+        value['positions'][0].update(samples=1, occurrence_percent=4.2)
+        self.timing_respond([value])
+        self.assertIn('4:42 / 1 game', self.draw())
 
     def test_timing_position_switch_uses_own_average_and_unavailable_disables_copy(self):
         self.start(); self.call('TextCommand', 'barfight timing')
@@ -1054,7 +1058,7 @@ class WidgetTests(unittest.TestCase):
         value = timing_profile('200')
         value['positions'].append(dict(value['positions'][0], spot='P3', position_name='Air', mean_seconds=360))
         self.timing_respond([value])
-        self.assertIn('6:00', self.draw())
+        self.assertIn('6:00 / 18 games', self.draw())
         request_id = self.timing_request()['request_id']
         self.click_text('Traits'); self.click_text('Build timings'); self.click_text('Copy timing')
         self.assertEqual(self.timing_request()['request_id'], request_id)
@@ -1235,7 +1239,7 @@ class WidgetTests(unittest.TestCase):
             self.call('ViewResize', width, height)
             texts = self.draw()
             self.assertIn('Copy timing', texts)
-            self.assertIn('4:42', texts)
+            self.assertIn('4:42 / 18 games', texts)
             self.choose_timing_position('Beach sea')
             texts = self.draw()
             self.assertIn('Beach sea (manual)', texts)

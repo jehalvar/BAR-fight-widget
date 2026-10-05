@@ -22,10 +22,10 @@ gets one ready in their recorded games. You can also open this view with
 `/barfight timing`.
 
 **Average ready time** is the arithmetic mean of the first completion time in
-games where a completion was observed. **Typical time** is the median. These are
-times from game start. The occurrence and coverage percentages show how often the
-unit appeared and how much of the selected history could be measured. They are
-historical habits, not deadlines or predictions for this match.
+games where a completion was observed. The result shows **4:42 / 18 games**:
+the time from game start, followed by the number of games actually used in that
+average. Games without a measured completion do not count toward that number.
+These are historical habits, not deadlines or predictions for this match.
 
 A unit started by this player still counts when it was handed to an ally
 unfinished and completed later. Its ready time is that later completion, not the
