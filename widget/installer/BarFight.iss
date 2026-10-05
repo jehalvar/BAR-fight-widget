@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.1.9"
+  #define AppVersion "0.1.10"
 #endif
 
 [Setup]
@@ -71,6 +71,8 @@ Filename: "{app}\BarFightBridge.exe"; Parameters: "--data-dir ""{code:GetBarData
 [UninstallDelete]
 Type: files; Name: "{code:GetBarDataDir}\LuaUI\Config\bar_fight_traits_request.json"; Check: HasBarDataDir
 Type: files; Name: "{code:GetBarDataDir}\LuaUI\Config\bar_fight_traits_response.json"; Check: HasBarDataDir
+Type: files; Name: "{code:GetBarDataDir}\LuaUI\Config\bar_fight_timings_request.json"; Check: HasBarDataDir
+Type: files; Name: "{code:GetBarDataDir}\LuaUI\Config\bar_fight_timings_response.json"; Check: HasBarDataDir
 Type: files; Name: "{app}\bar-fight.ini"
 
 [Code]

@@ -8,6 +8,15 @@ When profile fetching is enabled and the widget is active, the helper sends the 
 
 The helper may use the existing BAR Fight fallback endpoint, `https://replay.164.90.210.36.sslip.io/api/widget/traits`, when the primary service fails in a supported way. Both endpoints receive the same request fields. TLS certificate validation remains enabled.
 
+When you open Build timings, the helper requests the selected account, supported
+map and selected unit code or group from `https://bar-fight.com/api/widget/timings`.
+It also fetches and caches the public list at
+`https://bar-fight.com/api/widget/timing-units`. The same approved fallback host
+may be used. The service returns historical average and median first-ready times,
+positions, dates, sample sizes and measurement coverage. Unit codes and groups
+are URL query parameters and may appear in server logs. These lookups use the
+same profile-fetching privacy control; they do not send current build orders.
+
 The server and its hosting infrastructure receive the source IP address, requested URL, request time and HTTP headers, including the helper's `BARFightBridge/1.0` User-Agent. Account IDs and the map name are URL query parameters and can therefore appear in server access logs. The service can also retain requested public account IDs and request times to prioritize background profile preparation. This client policy does not set a retention period for the separately operated service's access logs.
 
 The client does not upload replay files, local game history, chat, player commands, screenshots or local filesystem paths. It does not record gameplay or run replay simulations. It uses the game's current roster to identify accounts; public replay analysis happens separately on the service.
@@ -15,6 +24,11 @@ The client does not upload replay files, local game history, chat, player comman
 ## Local files
 
 The widget and helper exchange JSON data through `LuaUI/Config/bar_fight_traits_request.json` and `LuaUI/Config/bar_fight_traits_response.json` in the selected BAR data folder. These local files can contain the requested public account IDs, map name and returned public profiles. Panel settings are stored through BAR's widget configuration. The installer stores the selected data folder and client settings locally.
+
+Timing lookups use separate `LuaUI/Config/bar_fight_timings_request.json` and
+`LuaUI/Config/bar_fight_timings_response.json` files. **Copy timing** writes the
+selected player name, historical position, unit label and average time to your
+clipboard only when clicked. It does not send the copied text to game chat.
 
 Downloaded updates, their verification metadata and temporary recovery copies are stored beneath the client installation folder. They contain client release files, not uploaded gameplay data.
 

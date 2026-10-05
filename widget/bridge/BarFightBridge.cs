@@ -19,6 +19,8 @@ internal static class BarFightBridge
     const string MapName = "Supreme Isthmus v2.1";
     const string DefaultEndpoint = "https://bar-fight.com/api/widget/traits";
     const string LegacyEndpoint = "https://replay.164.90.210.36.sslip.io/api/widget/traits";
+    const string TimingPath = "/api/widget/timings";
+    const string TimingUnitsPath = "/api/widget/timing-units";
     const int MaxRequestBytes = 16384;
     const int MaxResponseBytes = 2 * 1024 * 1024;
     const int FreshSeconds = 300;
@@ -27,6 +29,7 @@ internal static class BarFightBridge
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly Regex SafeRequestId = new Regex("\\A[A-Za-z0-9_-]{1,80}\\z", RegexOptions.CultureInvariant);
     static readonly Regex AccountPattern = new Regex("\\A[1-9][0-9]{0,15}\\z", RegexOptions.CultureInvariant);
+    static readonly Regex UnitPattern = new Regex("\\A(?:[a-z][a-z0-9_]{0,99}|group:[a-z][a-z0-9-]{0,79})\\z", RegexOptions.CultureInvariant);
     static readonly HashSet<string> ProfileStatuses = new HashSet<string>(new string[] {
         "available", "no_qualifying_traits", "insufficient_evidence", "preparing", "no_data"
     }, StringComparer.Ordinal);
@@ -37,6 +40,8 @@ internal static class BarFightBridge
         public string[] Accounts;
         public string Key;
         public DateTime WrittenUtc;
+        public string Unit;
+        public bool Catalog;
     }
 
     sealed class FetchResult
@@ -220,14 +225,36 @@ internal static class BarFightBridge
         Func<Uri, Request, CancellationToken, FetchResult> fetchForTest = null,
         int preparationRetrySeconds = RetrySeconds, int fetchThrottleSeconds = ThrottleSeconds)
     {
+        // Each local channel keeps independent requests, cache and responses. HTTP
+        // runs on worker threads and cannot block the Spring/Lua game thread.
+        if (fetchForTest != null)
+            return RunChannel(options, stop, token, fetchForTest, preparationRetrySeconds, fetchThrottleSeconds);
+        Task<int> timing = Task.Factory.StartNew(delegate {
+            return RunChannel(options, stop, token, null, preparationRetrySeconds, fetchThrottleSeconds, true);
+        });
+        try
+        {
+            int traits = RunChannel(options, stop, token, null, preparationRetrySeconds, fetchThrottleSeconds);
+            if (!options.Once) stop.Set();
+            return Math.Max(traits, timing.Result);
+        }
+        finally { if (!options.Once) stop.Set(); }
+    }
+
+    static int RunChannel(Options options, EventWaitHandle stop, CancellationToken token,
+        Func<Uri, Request, CancellationToken, FetchResult> fetchForTest = null,
+        int preparationRetrySeconds = RetrySeconds, int fetchThrottleSeconds = ThrottleSeconds, bool timings = false,
+        Func<bool> profilesEnabledForTest = null)
+    {
         // Do not inherit an obsolete TLS default from the Framework installation.
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         string config = Path.Combine(options.DataDir, "LuaUI", "Config");
         Directory.CreateDirectory(config);
-        string requestPath = Path.Combine(config, "bar_fight_traits_request.json");
-        string responsePath = Path.Combine(config, "bar_fight_traits_response.json");
+        string prefix = timings ? "bar_fight_timings" : "bar_fight_traits";
+        string requestPath = Path.Combine(config, prefix + "_request.json");
+        string responsePath = Path.Combine(config, prefix + "_response.json");
         Dictionary<string, FetchResult> cache = new Dictionary<string, FetchResult>(StringComparer.Ordinal);
-        Func<Uri, Request, CancellationToken, FetchResult> fetch = fetchForTest ?? Fetch;
+        Func<Uri, Request, CancellationToken, FetchResult> fetch = fetchForTest ?? (timings ? (Func<Uri, Request, CancellationToken, FetchResult>)FetchTimings : Fetch);
         Request current = null;
         Request inFlight = null;
         Task<FetchResult> pending = null;
@@ -244,7 +271,7 @@ internal static class BarFightBridge
         while (!stop.WaitOne(0))
         {
             DateTime now = DateTime.UtcNow;
-            if (!options.Once && fetchForTest == null && now >= nextUpdate)
+            if (!timings && !options.Once && fetchForTest == null && now >= nextUpdate)
             {
                 nextUpdate = now.AddMinutes(5);
                 CheckForUpdates(options.DataDir);
@@ -254,7 +281,7 @@ internal static class BarFightBridge
                 FileInfo file = new FileInfo(requestPath);
                 if (file.Exists && (file.LastWriteTimeUtc != lastModified || file.Length != lastLength))
                 {
-                    Request incoming = ReadRequest(requestPath, now);
+                    Request incoming = ReadRequest(requestPath, now, timings);
                     // Only remember a successful read: a widget may still be writing the file.
                     lastModified = file.LastWriteTimeUtc;
                     lastLength = file.Length;
@@ -271,13 +298,17 @@ internal static class BarFightBridge
             }
             // InvalidDataException inherits SystemException in .NET Framework,
             // not IOException. Incomplete or malformed widget files are retried.
-            catch (InvalidDataException) { }
+            catch (InvalidDataException) { if (timings) current = null; }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
             catch (ArgumentException) { }
             catch (InvalidOperationException) { }
 
-            bool profilesEnabled = ProfileLookupsEnabled();
+            // Timing selections can change rapidly while a fetch is in progress.
+            // Drop obsolete work and never publish it under a new request ID.
+            if (timings && pendingCancellation != null && !SameRequest(current, inFlight)) pendingCancellation.Cancel();
+
+            bool profilesEnabled = profilesEnabledForTest != null ? profilesEnabledForTest() : ProfileLookupsEnabled();
             if (profilesEnabled != lastProfilesEnabled) { delivered = null; nextFetch = DateTime.MinValue; lastProfilesEnabled = profilesEnabled; }
             if (!profilesEnabled)
             {
@@ -301,9 +332,9 @@ internal static class BarFightBridge
             {
                 FetchResult result;
                 try { result = pending.Result; }
-                catch (AggregateException) { result = new FetchResult { Error = "The companion could not fetch traits. Retrying shortly.", FetchedUtc = DateTime.UtcNow }; }
+                catch (AggregateException) { result = new FetchResult { Error = "The companion could not fetch " + (timings ? "unit timings" : "traits") + ". Retrying shortly.", FetchedUtc = DateTime.UtcNow }; }
                 bool retryPreparing = result.Payload != null && NeedsPreparationRetry(result.Payload);
-                if (result.Payload != null && !retryPreparing)
+                if (result.Payload != null && !retryPreparing && (!timings || SameRequest(current, inFlight)))
                 {
                     if (cache.Count >= 64) cache.Clear();
                     cache[inFlight.Key] = result;
@@ -393,16 +424,16 @@ internal static class BarFightBridge
         return age >= -60 && age <= FreshSeconds;
     }
 
-    static Request ReadRequest(string path, DateTime now)
+    static Request ReadRequest(string path, DateTime now, bool timings = false)
     {
         FileInfo file = new FileInfo(path);
         if (!file.Exists || !IsFresh(file.LastWriteTimeUtc, now)) return null;
         DateTime written = file.LastWriteTimeUtc;
         using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            return ParseRequest(ReadBounded(stream, MaxRequestBytes), written);
+            return ParseRequest(ReadBounded(stream, MaxRequestBytes), written, timings);
     }
 
-    static Request ParseRequest(string json, DateTime written)
+    static Request ParseRequest(string json, DateTime written, bool timings = false)
     {
         Dictionary<string, object> obj = Obj(Serializer(MaxRequestBytes).DeserializeObject(json));
         if (Integer(Field(obj, "schema"), 1, 1) != 1) throw Invalid();
@@ -419,18 +450,27 @@ internal static class BarFightBridge
             accounts.Add(account);
         }
         accounts.Sort(StringComparer.Ordinal);
-        return new Request { Id = id, Accounts = accounts.ToArray(), Key = MapName + "|" + String.Join(",", accounts.ToArray()), WrittenUtc = written };
+        string unit = timings ? UnitId(Field(obj, "unit")) : null;
+        return new Request { Id = id, Accounts = accounts.ToArray(), Unit = unit,
+            Key = MapName + "|" + String.Join(",", accounts.ToArray()) + (timings ? "|" + unit : ""), WrittenUtc = written };
     }
 
     static Uri RequestUri(Uri endpoint, Request request)
     {
-        return new Uri(endpoint.AbsoluteUri + "?accounts=" + Uri.EscapeDataString(String.Join(",", request.Accounts)) + "&map=" + Uri.EscapeDataString(MapName));
+        if (request.Catalog) return endpoint;
+        return new Uri(endpoint.AbsoluteUri + "?accounts=" + Uri.EscapeDataString(String.Join(",", request.Accounts)) + "&map=" + Uri.EscapeDataString(MapName)
+            + (request.Unit == null ? "" : "&unit=" + Uri.EscapeDataString(request.Unit)));
     }
 
     static bool AllowedEndpoint(Uri uri)
     {
+        return AllowedServiceEndpoint(uri, "/api/widget/traits");
+    }
+
+    static bool AllowedServiceEndpoint(Uri uri, string path)
+    {
         return uri != null && uri.IsAbsoluteUri && uri.Scheme == Uri.UriSchemeHttps && uri.Port == 443 &&
-            uri.UserInfo.Length == 0 && uri.Fragment.Length == 0 && uri.AbsolutePath == "/api/widget/traits" &&
+            uri.UserInfo.Length == 0 && uri.Fragment.Length == 0 && uri.AbsolutePath == path &&
             (String.Equals(uri.Host, "bar-fight.com", StringComparison.OrdinalIgnoreCase) ||
              String.Equals(uri.Host, "replay.164.90.210.36.sslip.io", StringComparison.OrdinalIgnoreCase));
     }
@@ -438,7 +478,8 @@ internal static class BarFightBridge
     static Uri RedirectUri(Uri current, string location, Request request)
     {
         Uri target;
-        if (String.IsNullOrEmpty(location) || !Uri.TryCreate(current, location, out target) || !AllowedEndpoint(target)) throw Invalid();
+        string path = request.Catalog ? TimingUnitsPath : request.Unit != null ? TimingPath : "/api/widget/traits";
+        if (String.IsNullOrEmpty(location) || !Uri.TryCreate(current, location, out target) || !AllowedServiceEndpoint(target, path)) throw Invalid();
         // A redirect may only select another approved endpoint, never alter the requested accounts.
         UriBuilder clean = new UriBuilder(target) { Query = "" };
         Uri expected = RequestUri(clean.Uri, request);
@@ -451,6 +492,41 @@ internal static class BarFightBridge
         FetchResult result = FetchOnce(endpoint, request, token);
         if (!token.IsCancellationRequested && ShouldUseLegacy(endpoint, result))
             result = FetchOnce(new Uri(LegacyEndpoint), request, token);
+        return result;
+    }
+
+    static Dictionary<string, object> timingCatalog;
+    static DateTime catalogFetched = DateTime.MinValue;
+    static DateTime catalogRetry = DateTime.MinValue;
+
+    static Uri ServiceUri(Uri endpoint, string path)
+    {
+        return new UriBuilder(endpoint) { Path = path, Query = "", Fragment = "" }.Uri;
+    }
+
+    static FetchResult FetchTimings(Uri endpoint, Request request, CancellationToken token)
+    {
+        Uri timingEndpoint = ServiceUri(endpoint, TimingPath);
+        FetchResult result = FetchOnce(timingEndpoint, request, token);
+        if (!token.IsCancellationRequested && String.Equals(endpoint.Host, new Uri(DefaultEndpoint).Host, StringComparison.OrdinalIgnoreCase)
+            && result.Payload == null && result.AllowLegacyFallback)
+            result = FetchOnce(ServiceUri(new Uri(LegacyEndpoint), TimingPath), request, token);
+        if (result.Payload == null || token.IsCancellationRequested) return result;
+        DateTime now = DateTime.UtcNow;
+        // Only the timing worker uses this cache. Catalogue errors never erase a
+        // valid player result, and retries are bounded even when the service fails.
+        if ((timingCatalog == null || (now - catalogFetched).TotalHours >= 6) && now >= catalogRetry)
+        {
+            catalogRetry = now.AddMinutes(5);
+            FetchResult catalog = FetchOnce(ServiceUri(new Uri(result.Endpoint ?? timingEndpoint.AbsoluteUri), TimingUnitsPath),
+                new Request { Catalog = true }, token);
+            if (catalog.Payload != null) { timingCatalog = catalog.Payload; catalogFetched = now; }
+        }
+        if (timingCatalog != null)
+        {
+            result.Payload["units"] = Field(timingCatalog, "units");
+            result.Payload["default_unit"] = Field(timingCatalog, "default_unit");
+        }
         return result;
     }
 
@@ -520,13 +596,14 @@ internal static class BarFightBridge
                         // with an HTML page. Never consume that body or accept it as data.
                         return new FetchResult { Error = "BAR Fight returned an unsupported response. The companion will retry shortly.",
                             ErrorCode = "unexpected-content-type", FetchedUtc = DateTime.UtcNow,
-                            AllowLegacyFallback = !attemptedLegacy && IsCanonicalNonJsonResponse(current, code, response.ContentType) };
+                            AllowLegacyFallback = !attemptedLegacy && (IsCanonicalNonJsonResponse(current, code, response.ContentType)
+                                || request.Unit != null && AllowedServiceEndpoint(current, TimingPath) && String.Equals(current.Host, "bar-fight.com", StringComparison.OrdinalIgnoreCase)) };
                     }
                     if (response.ContentLength > MaxResponseBytes) throw Invalid();
                     using (Stream body = response.GetResponseStream())
                     {
                         string json = ReadBounded(body, MaxResponseBytes);
-                        return new FetchResult { Payload = ValidateResponse(json, request), FetchedUtc = DateTime.UtcNow,
+                        return new FetchResult { Payload = request.Catalog ? ValidateCatalog(json) : request.Unit != null ? ValidateTimingResponse(json, request) : ValidateResponse(json, request), FetchedUtc = DateTime.UtcNow,
                             Endpoint = current.GetLeftPart(UriPartial.Path) };
                     }
                 }
@@ -552,7 +629,7 @@ internal static class BarFightBridge
         }
         catch (Exception)
         {
-            return new FetchResult { Error = "BAR Fight returned an invalid traits response. The companion will retry shortly.",
+            return new FetchResult { Error = "BAR Fight returned an invalid profile response. The companion will retry shortly.",
                 ErrorCode = "invalid-response", FetchedUtc = DateTime.UtcNow };
         }
     }
@@ -628,6 +705,122 @@ internal static class BarFightBridge
         };
     }
 
+    static string UnitId(object value)
+    {
+        string id = Text(value, 100);
+        if (!UnitPattern.IsMatch(id)) throw Invalid();
+        return id;
+    }
+
+    static Dictionary<string, object> CleanUnit(object value)
+    {
+        Dictionary<string, object> unit = Obj(value);
+        string id = UnitId(Field(unit, "id")), kind = Text(Field(unit, "kind"), 10);
+        if (kind != "unit" && kind != "group" || (kind == "group") != id.StartsWith("group:", StringComparison.Ordinal)) throw Invalid();
+        return new Dictionary<string, object> { {"id", id}, {"label", SingleLine(Field(unit, "label"), 160)}, {"kind", kind} };
+    }
+
+    static Dictionary<string, object> ValidateCatalog(string json)
+    {
+        Dictionary<string, object> source = Obj(Serializer(MaxResponseBytes).DeserializeObject(json));
+        Integer(Field(source, "schema"), 1, 1);
+        if (Text(Field(source, "status"), 40) != "available") throw Invalid();
+        string defaultUnit = UnitId(Field(source, "default_unit"));
+        List<object> units = new List<object>();
+        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (object raw in Array(Field(source, "units"), 1000))
+        {
+            Dictionary<string, object> unit = CleanUnit(raw);
+            if (!seen.Add((string)unit["id"])) throw Invalid();
+            units.Add(unit);
+        }
+        if (!seen.Contains(defaultUnit)) throw Invalid();
+        return new Dictionary<string, object> { {"units", units}, {"default_unit", defaultUnit} };
+    }
+
+    static Dictionary<string, object> ValidateTimingResponse(string json, Request request)
+    {
+        Dictionary<string, object> source = Obj(Serializer(MaxResponseBytes).DeserializeObject(json));
+        Integer(Field(source, "schema"), 1, 1);
+        if (Text(Field(source, "map"), 120) != MapName || Text(Field(source, "method"), 80) != "creator-first-ready-v1") throw Invalid();
+        string status = Text(Field(source, "status"), 40);
+        if (status != "available" && status != "preparing") throw Invalid();
+        Dictionary<string, object> unit = CleanUnit(Field(source, "unit"));
+        if ((string)unit["id"] != request.Unit) throw Invalid();
+        HashSet<string> wanted = new HashSet<string>(request.Accounts, StringComparer.Ordinal);
+        List<object> profiles = new List<object>();
+        foreach (object raw in Array(Field(source, "profiles"), 16))
+        {
+            Dictionary<string, object> profile = Obj(raw);
+            string account = Account(Field(profile, "account_id"));
+            if (!wanted.Remove(account)) throw Invalid();
+            List<object> positions = new List<object>();
+            HashSet<string> spots = new HashSet<string>(StringComparer.Ordinal);
+            foreach (object rawPosition in Array(Field(profile, "positions"), 8))
+            {
+                Dictionary<string, object> position = Obj(rawPosition);
+                string spot = Text(Field(position, "spot"), 2);
+                if (spot.Length != 2 || spot[0] != 'P' || spot[1] < '1' || spot[1] > '8' || !spots.Add(spot)) throw Invalid();
+                int games = Integer(Field(position, "games"), 0, Int32.MaxValue);
+                int coverage = Integer(Field(position, "coverage_games"), 0, games);
+                int samples = Integer(Field(position, "samples"), 0, coverage);
+                string positionStatus = TimingStatus(Field(position, "status"));
+                object mean = Field(position, "mean_seconds"), median = Field(position, "median_seconds"), occurrence = Field(position, "occurrence_percent");
+                if ((samples == 0) != (mean == null) || (samples == 0) != (median == null) || (coverage == 0) != (occurrence == null)) throw Invalid();
+                if (positionStatus == "available" && samples == 0 || positionStatus == "not_observed" && samples != 0) throw Invalid();
+                if (samples > 0 && (Number(mean, 0, 86400) <= 0 || Number(median, 0, 86400) <= 0)) throw Invalid();
+                Dictionary<string, object> cleanPosition = new Dictionary<string, object> {
+                    {"spot", spot}, {"position_name", SingleLine(Field(position, "position_name"), 120)}, {"games", games},
+                    {"status", positionStatus}, {"samples", samples}, {"coverage_games", coverage},
+                    {"coverage_percent", Number(Field(position, "coverage_percent"), 0, 100)},
+                    {"occurrence_percent", occurrence == null ? null : (object)Number(occurrence, 0, 100)},
+                    {"mean_seconds", mean == null ? null : (object)Number(mean, 0, 86400)},
+                    {"median_seconds", median == null ? null : (object)Number(median, 0, 86400)}
+                };
+                object preparing;
+                if (position.TryGetValue("preparing", out preparing)) cleanPosition["preparing"] = Boolean(preparing);
+                positions.Add(cleanPosition);
+            }
+            object reason = Field(profile, "stale_reason");
+            profiles.Add(new Dictionary<string, object> {
+                {"account_id", account}, {"name", SingleLine(Field(profile, "name"), 120)}, {"status", TimingStatus(Field(profile, "status"))},
+                {"period", Period(Field(profile, "period"))}, {"generated_at", Timestamp(Field(profile, "generated_at"))},
+                {"checked_at", Timestamp(Field(profile, "checked_at"))}, {"stale", Boolean(Field(profile, "stale"))},
+                {"stale_reason", reason == null ? null : (object)Text(reason, 200)}, {"preparing", Boolean(Field(profile, "preparing"))},
+                {"positions", positions}
+            });
+        }
+        if (wanted.Count != 0) throw Invalid();
+        return new Dictionary<string, object> {
+            {"schema", 1}, {"map", MapName}, {"method", "creator-first-ready-v1"}, {"unit", unit}, {"status", status},
+            {"period", Period(Field(source, "period"))}, {"generated_at", Timestamp(Field(source, "generated_at"))},
+            {"checked_at", Timestamp(Field(source, "checked_at"))}, {"profiles", profiles}
+        };
+    }
+
+    static string TimingStatus(object value)
+    {
+        string status = Text(value, 40);
+        if (status != "available" && status != "not_observed" && status != "unavailable" && status != "preparing" && status != "no_data") throw Invalid();
+        return status;
+    }
+
+    static string SingleLine(object value, int limit)
+    {
+        string text = Text(value, limit);
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (Char.IsControl(c)) throw Invalid();
+            if (Char.IsHighSurrogate(c))
+            {
+                if (++i >= text.Length || !Char.IsLowSurrogate(text[i])) throw Invalid();
+            }
+            else if (Char.IsLowSurrogate(c)) throw Invalid();
+        }
+        return text;
+    }
+
     static bool TryWriteResponse(string path, Request request, FetchResult result, bool cached)
     {
         try
@@ -638,6 +831,7 @@ internal static class BarFightBridge
             response["ok"] = result.Payload != null;
             response["fetched_at"] = result.FetchedUtc.ToString("o", CultureInfo.InvariantCulture);
             response["cached"] = cached;
+            if (request.Unit != null) response["requested_unit"] = request.Unit;
             if (result.Endpoint != null) response["service_url"] = result.Endpoint;
             if (result.ErrorCode != null) response["error_code"] = result.ErrorCode;
             AtomicWrite(path, Serializer(MaxResponseBytes).Serialize(response));
@@ -804,8 +998,165 @@ internal static class BarFightBridge
         TestMalformedRecovery(check, valid, server);
         TestPreparationRetry(check, valid, server);
         TestCachedDelivery(check, valid, server);
+        TestTimings(check, rejects, valid, period);
         Console.WriteLine("BAR Fight companion: " + checks + " offline self-tests passed.");
         return 0;
+    }
+
+    static void TestTimings(Action<bool> check, Action<Action> rejects, string traitsRequest, string period)
+    {
+        DateTime now = DateTime.UtcNow;
+        string requestJson = traitsRequest.Replace("\"accounts\":", "\"unit\":\"group:t2-constructor\",\"accounts\":");
+        Request request = ParseRequest(requestJson, now, true);
+        string unit = "{\"id\":\"group:t2-constructor\",\"label\":\"T2 constructors\",\"kind\":\"group\"}";
+        string position = "{\"spot\":\"P2\",\"position_name\":\"Tech\",\"games\":12,\"status\":\"available\",\"samples\":9,\"coverage_games\":10,\"coverage_percent\":83.3,\"occurrence_percent\":90,\"mean_seconds\":302.4,\"median_seconds\":295}";
+        string profile = "{\"account_id\":\"21705\",\"name\":\"Player\",\"status\":\"available\",\"period\":" + period + ",\"generated_at\":1790000000,\"checked_at\":1790000000,\"stale\":false,\"stale_reason\":null,\"preparing\":false,\"positions\":[" + position + "]}";
+        string server = "{\"schema\":1,\"method\":\"creator-first-ready-v1\",\"unit\":" + unit + ",\"map\":\"Supreme Isthmus v2.1\",\"period\":" + period + ",\"status\":\"available\",\"generated_at\":1790000000,\"checked_at\":1790000000,\"profiles\":[" + profile + "," + profile.Replace("21705", "42") + "]}";
+        check(ValidateTimingResponse(server, request).ContainsKey("unit"));
+        check(!NeedsPreparationRetry(ValidateTimingResponse(server, request)));
+        check(NeedsPreparationRetry(ValidateTimingResponse(server.Replace("\"preparing\":false", "\"preparing\":true"), request)));
+        check(NeedsPreparationRetry(ValidateTimingResponse(server.Replace("\"stale\":false", "\"stale\":true"), request)));
+        check(ValidateTimingResponse(server.Replace("1790000000", "null"), request).ContainsKey("profiles"));
+        string absent = position.Replace("\"status\":\"available\"", "\"status\":\"not_observed\"").Replace("\"samples\":9", "\"samples\":0")
+            .Replace("\"mean_seconds\":302.4", "\"mean_seconds\":null").Replace("\"median_seconds\":295", "\"median_seconds\":null").Replace("\"occurrence_percent\":90", "\"occurrence_percent\":0");
+        check(ValidateTimingResponse(server.Replace(position, absent), request).ContainsKey("profiles"));
+        string uncovered = absent.Replace("\"status\":\"not_observed\"", "\"status\":\"unavailable\"").Replace("\"coverage_games\":10", "\"coverage_games\":0")
+            .Replace("\"coverage_percent\":83.3", "\"coverage_percent\":0").Replace("\"occurrence_percent\":0", "\"occurrence_percent\":null");
+        check(ValidateTimingResponse(server.Replace(position, uncovered), request).ContainsKey("profiles"));
+        rejects(delegate { ParseRequest(requestJson.Replace("group:t2-constructor", "https://example.com"), now, true); });
+        rejects(delegate { ParseRequest(requestJson.Replace("group:t2-constructor", "unit:armack"), now, true); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("302.4", "null"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("302.4", "0"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("302.4", "86401"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"samples\":9", "\"samples\":11"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"coverage_games\":10", "\"coverage_games\":13"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"occurrence_percent\":90", "\"occurrence_percent\":null"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"coverage_percent\":83.3", "\"coverage_percent\":101"), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"42\"", "\"99\""), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"42\"", "\"21705\""), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"T2 constructors\"", "\"T2\\nconstructors\""), request); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"Tech\"", "\"Tech\\u0000\""), request); });
+        rejects(delegate { SingleLine("Tech\uD800", 120); });
+        rejects(delegate { ValidateTimingResponse(server.Replace("\"id\":\"group:t2-constructor\"", "\"id\":\"group:t2-air\""), request); });
+        string catalog = "{\"schema\":1,\"status\":\"available\",\"default_unit\":\"group:t2-constructor\",\"units\":[" + unit + "]}";
+        check(ValidateCatalog(catalog).ContainsKey("units"));
+        rejects(delegate { ValidateCatalog(catalog.Replace("[" + unit + "]", "[" + unit + "," + unit + "]")); });
+        rejects(delegate { ValidateCatalog(catalog.Replace("\"default_unit\":\"group:t2-constructor\"", "\"default_unit\":\"armack\"")); });
+        Uri endpoint = ServiceUri(new Uri(DefaultEndpoint), TimingPath);
+        check(RequestUri(endpoint, request).Query.Contains("unit=group%3At2-constructor"));
+        check(AllowedServiceEndpoint(endpoint, TimingPath) && !AllowedServiceEndpoint(new Uri("http://bar-fight.com" + TimingPath), TimingPath));
+        check(!AllowedServiceEndpoint(new Uri("https://bar-fight.com.evil.example" + TimingPath), TimingPath));
+        check(!AllowedServiceEndpoint(new Uri("https://user@bar-fight.com" + TimingPath), TimingPath));
+        check(RedirectUri(RequestUri(endpoint, request), TimingPath, request).Query == RequestUri(endpoint, request).Query);
+        rejects(delegate { RedirectUri(RequestUri(endpoint, request), TimingPath + "?accounts=999", request); });
+        rejects(delegate { RedirectUri(RequestUri(endpoint, request), "/api/widget/traits", request); });
+        rejects(delegate { RedirectUri(RequestUri(endpoint, request), "https://example.com" + TimingPath, request); });
+        TestTimingChannel(check, requestJson, server);
+    }
+
+    static void TestTimingChannel(Action<bool> check, string requestJson, string server)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "BARFightBridge-timing-" + Guid.NewGuid().ToString("N"));
+        string config = Path.Combine(directory, "LuaUI", "Config");
+        string input = Path.Combine(config, "bar_fight_timings_request.json"), output = Path.Combine(config, "bar_fight_timings_response.json");
+        string traitsOutput = Path.Combine(config, "bar_fight_traits_response.json");
+        Directory.CreateDirectory(config);
+        int fetches = 0, cancelled = 0, enabled = 1;
+        Task<int> running = null;
+        using (EventWaitHandle stop = new EventWaitHandle(false, EventResetMode.ManualReset))
+        using (ManualResetEvent entered = new ManualResetEvent(false))
+        using (CancellationTokenSource cancel = new CancellationTokenSource())
+        {
+            try
+            {
+                File.WriteAllText(input, "{}", Utf8);
+                File.WriteAllText(traitsOutput, "{\"traits_sentinel\":true}", Utf8);
+                running = Task.Factory.StartNew(delegate {
+                    return RunChannel(new Options { DataDir = directory }, stop, cancel.Token,
+                        delegate(Uri endpoint, Request request, CancellationToken token) {
+                            int attempt = Interlocked.Increment(ref fetches);
+                            if (attempt == 1 || attempt == 4)
+                            {
+                                entered.Set();
+                                if (token.WaitHandle.WaitOne(7000)) Interlocked.Increment(ref cancelled);
+                            }
+                            string payload = server.Replace("group:t2-constructor", request.Unit);
+                            if (!request.Unit.StartsWith("group:", StringComparison.Ordinal)) payload = payload.Replace("\"kind\":\"group\"", "\"kind\":\"unit\"");
+                            return new FetchResult { Payload = ValidateTimingResponse(payload, request), FetchedUtc = DateTime.UtcNow };
+                        }, 1, 1, true, delegate { return Interlocked.CompareExchange(ref enabled, 0, 0) != 0; });
+                });
+                Thread.Sleep(1100);
+                check(!running.IsCompleted && fetches == 0 && !File.Exists(output));
+                File.WriteAllText(input, requestJson, Utf8);
+                check(entered.WaitOne(5000));
+                string second = requestJson.Replace("bft-1-2-3", "timing-second").Replace("group:t2-constructor", "armack");
+                File.WriteAllText(input, second, Utf8);
+                Dictionary<string, object> response = WaitTestResponse(output, "timing-second", running);
+                check(cancelled == 1 && fetches == 2 && response != null && Boolean(Field(response, "ok"))
+                    && Text(Field(Obj(Field(response, "unit")), "id"), 100) == "armack" && !Boolean(Field(response, "cached")));
+                check(File.ReadAllText(traitsOutput, Utf8) == "{\"traits_sentinel\":true}");
+                File.WriteAllText(input, second.Replace("timing-second", "timing-cached"), Utf8);
+                response = WaitTestResponse(output, "timing-cached", running);
+                check(fetches == 2 && response != null && Boolean(Field(response, "cached")));
+                DateTime written = File.GetLastWriteTimeUtc(output);
+                Thread.Sleep(1100);
+                check(fetches == 2 && File.GetLastWriteTimeUtc(output) == written);
+                Interlocked.Exchange(ref enabled, 0);
+                response = WaitTestResponse(output, "timing-cached", running, "privacy-disabled");
+                check(fetches == 2 && response != null && !Boolean(Field(response, "ok")) && Array(Field(response, "profiles"), 16).Length == 0);
+                Interlocked.Exchange(ref enabled, 1);
+                response = WaitTestResponse(output, "timing-cached", running, null, true);
+                check(fetches == 2 && response != null && Boolean(Field(response, "cached")));
+                File.WriteAllText(input, requestJson.Replace("bft-1-2-3", "timing-stale-not-cached"), Utf8);
+                response = WaitTestResponse(output, "timing-stale-not-cached", running);
+                check(fetches == 3 && response != null && !Boolean(Field(response, "cached")));
+                entered.Reset();
+                File.WriteAllText(input, requestJson.Replace("bft-1-2-3", "timing-privacy-in-flight").Replace("group:t2-constructor", "armalab"), Utf8);
+                check(entered.WaitOne(5000));
+                Interlocked.Exchange(ref enabled, 0);
+                response = WaitTestResponse(output, "timing-privacy-in-flight", running, "privacy-disabled");
+                DateTime cancellationDeadline = DateTime.UtcNow.AddSeconds(2);
+                while (cancelled != 2 && DateTime.UtcNow < cancellationDeadline) Thread.Sleep(20);
+                check(cancelled == 2 && fetches == 4 && response != null && !Boolean(Field(response, "ok")));
+                Thread.Sleep(1100);
+                check(fetches == 4 && !Boolean(Field(Obj(Serializer(MaxResponseBytes).DeserializeObject(File.ReadAllText(output, Utf8))), "ok")));
+                stop.Set();
+                check(running.Wait(3000) && running.Result == 0);
+            }
+            finally
+            {
+                stop.Set(); cancel.Cancel();
+                if (running != null && !running.IsCompleted) running.Wait(3000);
+                if (File.Exists(input)) File.Delete(input);
+                if (File.Exists(output)) File.Delete(output);
+                if (File.Exists(traitsOutput)) File.Delete(traitsOutput);
+                Directory.Delete(config, false);
+                Directory.Delete(Path.GetDirectoryName(config), false);
+                Directory.Delete(directory, false);
+            }
+        }
+    }
+
+    static Dictionary<string, object> WaitTestResponse(string path, string id, Task<int> running, string errorCode = null, bool requireOk = false)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(6);
+        while (!running.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    Dictionary<string, object> response = Obj(Serializer(MaxResponseBytes).DeserializeObject(File.ReadAllText(path, Utf8)));
+                    object code;
+                    if (Text(Field(response, "request_id"), 80) == id && (!requireOk || Boolean(Field(response, "ok")))
+                        && (errorCode == null || response.TryGetValue("error_code", out code) && Text(code, 80) == errorCode)) return response;
+                }
+            }
+            catch (IOException) { }
+            catch (ArgumentException) { }
+            Thread.Sleep(50);
+        }
+        return null;
     }
 
     static void TestMalformedRecovery(Action<bool> check, string valid, string server)

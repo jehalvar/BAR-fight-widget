@@ -14,6 +14,8 @@ end
 
 local REQUEST_PATH = "LuaUI/Config/bar_fight_traits_request.json"
 local RESPONSE_PATH = "LuaUI/Config/bar_fight_traits_response.json"
+local TIMING_REQUEST_PATH = "LuaUI/Config/bar_fight_timings_request.json"
+local TIMING_RESPONSE_PATH = "LuaUI/Config/bar_fight_timings_response.json"
 local MAP = "Supreme Isthmus v2.1"
 local MAX_BYTES, MAX_PLAYERS = 1048576, 16
 local MAX_HOVER_TRAITS = 4
@@ -247,6 +249,12 @@ end
 local elapsed, rosterTimer, responseTimer = 0, 0, 0
 local open, roster, accounts, requestedAccounts, profiles = false, {}, {}, {}, {}
 local selectedPlayer, selectedSpot, expandedTrait = nil, nil, nil
+local activeTab = "traits"
+local timing = {unit = "group:t2-constructor", label = "T2 constructors", units = {
+    {id = "group:t2-constructor", label = "T2 constructors", kind = "group"}},
+    lastRequestAt = -REFRESH_SECONDS, signature = "", status = "Choose a unit to inspect historical ready times.",
+    connectionState = "unverified", search = "", searching = false, scroll = 0}
+local timingSearchArea, timingListArea
 local rosterScroll, traitScroll = 0, 0
 local lastSignature, lastRequestID, lastResponseText = "", nil, nil
 local requestSequence, lastRequestAt, pendingAt, lastSuccessAt = 0, -REFRESH_SECONDS, nil, nil
@@ -481,11 +489,12 @@ local function fit(value, width, size)
     return value .. "..."
 end
 
-local function connectionLabel()
-    if connectionState == "connected" and checkedAt then
+local function connectionLabel(state, checked)
+    if state == nil then state, checked = connectionState, checkedAt end
+    if state == "connected" and checked then
         local now = os and os.time and os.time()
-        if not now or now < checkedAt then return "Website: not checked", palette.muted end
-        local age = math.floor(now - checkedAt)
+        if not now or now < checked then return "Website: not checked", palette.muted end
+        local age = math.floor(now - checked)
         local ago = age < 60 and (age .. "s") or (math.floor(age / 60) .. "m")
         if age < CONNECTION_FRESH_SECONDS then return "Website: connected (checked " .. ago .. " ago)", palette.accent end
         return "Website: last check " .. ago .. " ago", palette.warning
@@ -496,7 +505,8 @@ local function connectionLabel()
         disabled = "Website: profile lookups disabled", invalid = "Website: invalid helper reply",
         timeout = "Website: no helper reply", local_error = "Website: local request failed",
         unsupported = "Website: not checked (unsupported map)", no_accounts = "Website: not checked (no account IDs)"}
-    return labels[connectionState] or labels.unverified, connectionState == "unverified" and palette.muted or palette.warning
+    if state == "cached" and activeTab == "timings" then return "Website: cached timings (not checked)", palette.warning end
+    return labels[state] or labels.unverified, state == "unverified" and palette.muted or palette.warning
 end
 
 local function wrapped(value, width, size)
@@ -523,6 +533,173 @@ end
 
 local function selectedRow()
     for _, row in ipairs(roster) do if row.player_id == selectedPlayer then return row end end
+end
+
+local function timingUnitID(value)
+    if type(value) ~= "string" or #value > 100 then return nil end
+    if value:match("^[a-z][a-z0-9_]*$") or value:match("^group:[a-z][a-z0-9%-]*$") then return value end
+end
+
+local function timingSignature()
+    local row = selectedRow()
+    if not supportedMap() or #accounts == 0 or not row or not row.account_id then return nil end
+    return MAP .. ":" .. row.account_id .. ":" .. timing.unit, row
+end
+
+local function requestTiming(manual)
+    local signature, row = timingSignature()
+    if not signature then
+        timing.signature, timing.requestID, timing.profile, timing.pendingAt = "", nil, nil, nil
+        timing.connectionState, timing.checkedAt = "no_accounts", nil
+        timing.status = "A supported map and stable player account are needed."
+        return false
+    end
+    if signature == timing.signature and manual and elapsed - timing.lastRequestAt < REFRESH_SECONDS then return false end
+    requestSequence = requestSequence + 1
+    local epoch = os and os.time and os.time() or 0
+    local requestID = ("bftm-" .. epoch .. "-" .. INSTANCE_TOKEN .. "-" .. requestSequence):sub(1, 80)
+    local payload = '{"schema":1,"request_id":' .. jsonString(requestID) .. ',"map":' .. jsonString(MAP)
+        .. ',"accounts":[' .. jsonString(row.account_id) .. '],"unit":' .. jsonString(timing.unit) .. '}'
+    if Spring.CreateDir then pcall(Spring.CreateDir, "LuaUI/Config") end
+    local ok = pcall(function()
+        local file, err = io.open(TIMING_REQUEST_PATH, "wb")
+        if not file then error(err or "Cannot create timing request") end
+        local wrote, writeError = file:write(payload)
+        file:close()
+        if not wrote then error(writeError or "Cannot write timing request") end
+    end)
+    timing.signature, timing.lastRequestAt, timing.profile, timing.lastResponseText = signature, elapsed, nil, nil
+    timing.account, timing.copied, timing.checkedAt = row.account_id, false, nil
+    if not ok then
+        timing.requestID, timing.pendingAt, timing.connectionState = nil, nil, "local_error"
+        timing.status = "Cannot write the local timing request. Check the BAR Fight helper."
+        return false
+    end
+    timing.requestID, timing.pendingAt, timing.connectionState = requestID, elapsed, "connecting"
+    timing.status = "Loading historical build timings through the BAR Fight helper..."
+    return true
+end
+
+local function readySeconds(value)
+    return type(value) == "number" and value == value and value > 0 and value <= 86400
+end
+
+local function nullable(value)
+    return value == nil or value == NULL
+end
+
+local function validTimingProfile(raw)
+    if type(raw) ~= "table" or accountID(raw.account_id) ~= timing.account
+        or type(raw.positions) ~= "table" or #raw.positions > 8 then return nil end
+    local statuses = {available = true, preparing = true, unavailable = true, not_observed = true, no_data = true}
+    if not statuses[raw.status] then return nil end
+    local period = type(raw.period) == "table" and raw.period or {}
+    local result = {account_id = timing.account, status = raw.status, stale = raw.stale == true, preparing = raw.preparing == true,
+        generated_at = timestampText(raw.generated_at), checked_at = timestampText(raw.checked_at),
+        period = {start_date = textValue(period.start_date, 10), end_date = textValue(period.end_date, 10)}, positions = {}}
+    local seen = {}
+    for _, item in ipairs(raw.positions) do
+        if type(item) ~= "table" or not POSITION_NAMES[item.spot] or seen[item.spot] or not statuses[item.status]
+            or not integer(item.games) or not integer(item.samples) or not integer(item.coverage_games)
+            or item.samples > item.coverage_games or item.coverage_games > item.games
+            or not percent(item.coverage_percent)
+            or (item.coverage_games == 0 and not nullable(item.occurrence_percent))
+            or (item.coverage_games > 0 and not percent(item.occurrence_percent)) then return nil end
+        if item.status == "available" then
+            if item.samples == 0 or not readySeconds(item.mean_seconds) or not readySeconds(item.median_seconds) then return nil end
+        elseif not nullable(item.mean_seconds) or not nullable(item.median_seconds) then return nil end
+        seen[item.spot] = true
+        result.positions[#result.positions + 1] = {spot = item.spot, position_name = POSITION_NAMES[item.spot],
+            status = item.status, preparing = item.preparing == true, games = item.games, samples = item.samples, coverage_games = item.coverage_games,
+            coverage_percent = item.coverage_percent, occurrence_percent = not nullable(item.occurrence_percent) and item.occurrence_percent or nil,
+            mean_seconds = readySeconds(item.mean_seconds) and item.mean_seconds or nil,
+            median_seconds = readySeconds(item.median_seconds) and item.median_seconds or nil}
+    end
+    table.sort(result.positions, function(a, b) return a.spot < b.spot end)
+    return result
+end
+
+local function pollTimingResponse()
+    if not timing.requestID or not io or not io.open then return end
+    local file = io.open(TIMING_RESPONSE_PATH, "rb")
+    if not file then return end
+    local content = file:read(MAX_BYTES + 1); file:close()
+    if not content or content == timing.lastResponseText then return end
+    timing.lastResponseText = content
+    local ok, response = pcall(decodeJSON, content)
+    if not ok or type(response) ~= "table" then
+        timing.profile, timing.connectionState = nil, "invalid"
+        timing.status = "Invalid timing response; waiting for valid data."; return
+    end
+    if response.schema ~= 1 or response.request_id ~= timing.requestID then return end
+    if response.ok == false then
+        timing.profile, timing.pendingAt, timing.checkedAt = nil, nil, nil
+        timing.connectionState = response.error_code == "privacy-disabled" and "disabled" or "unavailable"
+        timing.status = "Timing helper unavailable: " .. textValue(response.error, 140); return
+    end
+    if response.ok ~= true or response.map ~= MAP or response.method ~= "creator-first-ready-v1"
+        or type(response.unit) ~= "table" or response.unit.id ~= timing.unit
+        or type(response.profiles) ~= "table" or #response.profiles ~= 1
+        or type(response.cached) ~= "boolean" then
+        timing.profile, timing.connectionState = nil, "invalid"
+        timing.status = "Timing reply does not match this lookup."; return
+    end
+    local incoming = validTimingProfile(response.profiles[1])
+    if not incoming or timingSignature() ~= timing.signature then
+        timing.profile, timing.connectionState = nil, "invalid"; timing.status = "Invalid player timing evidence."; return
+    end
+    local label = textValue(response.unit.label, 100)
+    if label == "" or (response.unit.kind ~= "group" and response.unit.kind ~= "unit") then return end
+    if type(response.units) == "table" and #response.units > 0 and #response.units <= 1000 then
+        local units, seen = {}, {}
+        for _, item in ipairs(response.units) do
+            if type(item) ~= "table" or not timingUnitID(item.id) or seen[item.id]
+                or textValue(item.label, 100) == "" or (item.kind ~= "group" and item.kind ~= "unit") then units = nil; break end
+            seen[item.id] = true
+            units[#units + 1] = {id = item.id, label = textValue(item.label, 100), kind = item.kind}
+        end
+        if units then timing.units = units end
+    end
+    timing.profile, timing.label, timing.pendingAt, timing.cached = incoming, label, nil, response.cached
+    local fetched, now = fetchedEpoch(response.fetched_at), os and os.time and os.time()
+    timing.connectionState = response.cached and "cached" or (fetched and now and fetched <= now and "connected" or "unverified")
+    timing.checkedAt = timing.connectionState == "connected" and fetched or nil
+    timing.status = incoming.status == "preparing" and "Build timing history is being prepared. Refresh in a minute."
+        or (response.cached and "Showing cached historical build timings." or "Historical build timings updated.")
+end
+
+local function matchingTimingPosition()
+    if timing.pendingAt or timing.signature ~= timingSignature() or not timing.profile then return nil end
+    for _, item in ipairs(timing.profile.positions) do if item.spot == selectedSpot then return item end end
+end
+
+local function readyTime(value)
+    local seconds = math.floor(value + 0.5)
+    return string.format("%d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
+local function copyTiming()
+    if not open or activeTab ~= "timings" then return end
+    local position, row = matchingTimingPosition(), selectedRow()
+    if not position or position.status ~= "available" or timing.profile.status ~= "available" or not row
+        or not readySeconds(position.mean_seconds) then return end
+    local value = row.name .. " - " .. position.position_name .. " - " .. timing.label .. " - " .. readyTime(position.mean_seconds)
+    if Spring.SetClipboard and pcall(Spring.SetClipboard, value) then
+        timing.copied = true; timing.status = "Timing copied to the clipboard. Nothing was sent to chat."
+    else timing.status = "Clipboard unavailable; the average ready time remains visible below." end
+end
+
+local function filteredTimingUnits()
+    local result, query = {}, timing.search:lower()
+    for _, item in ipairs(timing.units) do
+        if query == "" or item.label:lower():find(query, 1, true) or item.id:lower():find(query, 1, true) then result[#result + 1] = item end
+    end
+    return result
+end
+
+local function chooseTimingUnit(item)
+    timing.unit, timing.label, timing.searching, timing.search, timing.scroll, timing.copied = item.id, item.label, false, "", 0, false
+    requestTiming(false)
 end
 
 local function copyProfileLink(account)
@@ -753,6 +930,88 @@ local function drawDetails(x1, bottom, x2, top)
     end
 end
 
+local function drawTimings(x1, bottom, x2, top)
+    local row = selectedRow()
+    if not row then drawText("Waiting for the player roster...", x1, top - 18, 13, palette.muted); return end
+    drawText(fit(row.name, x2 - x1, 18), x1, top - 20, 18, palette.text)
+    if not row.account_id then
+        drawText(fit("No stable account ID supplied by this match.", x2 - x1, 12), x1, top - 48, 12, palette.warning); return
+    end
+    drawText("Account " .. row.account_id .. " | Historical build timings", x1, top - 40, 11, palette.muted)
+    timingSearchArea = {x1, top - 73, x2, top - 46}
+    button(x1, top - 73, x2, top - 46,
+        timing.searching and ("Search: " .. timing.search .. " |") or ("Unit: " .. timing.label .. "  [Search]"),
+        function() timing.searching, timing.search, timing.scroll = true, "", 0 end, timing.searching)
+    local profile = timing.signature == timingSignature() and timing.profile or nil
+    local history = profile or profiles[row.account_id]
+    local positions = history and history.positions or {}
+    if selectedSpot == nil then
+        local best
+        for _, item in ipairs(positions) do if not best or item.games > best.games then best = item end end
+        if best then selectedSpot = best.spot end
+    end
+    drawText("Historical position - choose a role to inspect", x1, top - 92, 12, palette.muted)
+    local chipWidth = math.max(1, (x2 - x1 - 8) / 2)
+    for index, item in ipairs(positions) do
+        local column, line = (index - 1) % 2, math.floor((index - 1) / 2)
+        local chipX, chipY = x1 + column * (chipWidth + 8), top - 122 - line * 28
+        if chipY >= bottom then
+            button(chipX, chipY, chipX + chipWidth, chipY + 24, item.position_name,
+                function() selectedSpot, timing.copied = item.spot, false end, item.spot == selectedSpot)
+        end
+    end
+    local y = top - 128 - math.ceil(#positions / 2) * 28
+    local function line(value, offset, size, color)
+        if y - offset >= bottom then drawText(fit(value, x2 - x1, size), x1, y - offset, size, color or palette.muted) end
+    end
+    local position = matchingTimingPosition()
+    if profile and position then
+        local available = profile.status == "available" and position.status == "available"
+        line("Average first ready time - from game start", 0, 12)
+        line(available and readyTime(position.mean_seconds) or "Not measured", 34, 30, available and palette.accent or palette.muted)
+        line(available and ("Median " .. readyTime(position.median_seconds) .. " | Recorded history, not a build deadline")
+            or (position.status == "preparing" and "History is being prepared. Refresh in a minute."
+            or position.status == "not_observed" and "No first-ready event observed in the measured games."
+            or "This unit timing is not measured for the selected position."), 55, 11)
+        line("Sample: " .. position.samples .. " first-ready games | Occurrence: " .. (percent(position.occurrence_percent) or "Unknown"), 74, 11)
+        line("Coverage: " .. percent(position.coverage_percent) .. " of selected games", 91, 11)
+        local period = profile.period.start_date ~= "" and (profile.period.start_date .. " to " .. profile.period.end_date .. " UTC") or "Historical dates unavailable"
+        line(period, 108, 11)
+        line((profile.generated_at ~= "" and ("Updated " .. profile.generated_at) or "Update date unavailable")
+            .. (profile.stale and " | Stale cache" or timing.cached and " | Helper cache" or ""), 125, 10,
+            (profile.stale or timing.cached) and palette.warning or palette.muted)
+        if available and y - 162 >= bottom then
+            button(x1, y - 162, x2, y - 136, timing.copied and "Copied timing" or "Copy timing", copyTiming)
+        else line("Copy timing unavailable for this result", 153, 11) end
+        local notes = (position.preparing and "More history is being prepared. " or "")
+            .. "Averages use games reaching first ready. Includes unfinished handovers; attributed to the creator."
+        for index, text in ipairs(wrapped(notes, x2 - x1, 10)) do line(text, 180 + (index - 1) * 14, 10) end
+    else
+        line(timing.pendingAt and "Loading this player's build timings..." or profile and "No timing history for the selected position."
+            or "No historical build timing is available yet.", 12, 12)
+        line(profile and profile.status == "preparing" and "History is being prepared. Refresh in a minute."
+            or "Keep the BAR Fight helper running, then refresh.", 33, 11)
+    end
+    -- Draw the search dropdown last so its hitboxes cover the result beneath it.
+    if timing.searching then
+        local matches = filteredTimingUnits()
+        local capacity = math.max(1, math.min(8, math.floor((top - 105 - bottom) / 27)))
+        timing.scroll = math.max(0, math.min(timing.scroll, math.max(0, #matches - capacity)))
+        local count = math.min(capacity, #matches)
+        local listBottom = top - 77 - math.max(1, count) * 27 - 23
+        timingListArea = {x1, listBottom, x2, top - 76}
+        rect(x1, listBottom, x2, top - 76, palette.background)
+        if count == 0 then drawText("No matching units", x1 + 8, top - 98, 12, palette.muted) end
+        for index = timing.scroll + 1, math.min(#matches, timing.scroll + capacity) do
+            local item, itemTop = matches[index], top - 77 - (index - timing.scroll - 1) * 27
+            button(x1 + 2, itemTop - 25, x2 - 2, itemTop, item.label .. (item.kind == "group" and " (group)" or (" [" .. item.id .. "]")),
+                function() chooseTimingUnit(item) end, item.id == timing.unit)
+        end
+        drawText(fit(#matches .. " matches | Scroll to browse | Enter selects top | Esc closes", x2 - x1 - 16, 10),
+            x1 + 8, listBottom + 6, 10, palette.muted)
+    end
+end
+
 function widget:Initialize()
     if Spring.GetViewGeometry then vsx, vsy = Spring.GetViewGeometry() end
     refreshRoster()
@@ -761,7 +1020,7 @@ function widget:Initialize()
 end
 
 function widget:Shutdown()
-    dragging = false
+    dragging, timing.searching = false, false
     if WG.barFightTraitsHover == receiveNativeHover then WG.barFightTraitsHover = nil end
     nativeHover, hoverKey = nil, nil
 end
@@ -770,7 +1029,7 @@ function widget:Update(dt)
     if type(dt) ~= "number" or dt < 0 then return end
     elapsed, rosterTimer, responseTimer = elapsed + dt, rosterTimer + dt, responseTimer + dt
     if rosterTimer >= 2 then rosterTimer = 0; refreshRoster() end
-    if responseTimer >= 1 then responseTimer = 0; pollResponse() end
+    if responseTimer >= 1 then responseTimer = 0; pollResponse(); pollTimingResponse() end
     if pendingAt and elapsed - pendingAt >= OFFLINE_SECONDS then
         connectionState, checkedAt = "timeout", nil
         status = "No helper reply yet. Start the BAR Fight helper; cached traits remain available."
@@ -779,15 +1038,26 @@ function widget:Update(dt)
         or (open and elapsed - lastRequestAt >= ACTIVE_REFRESH_SECONDS) then
         requestTraits(false)
     end
+    if open and activeTab == "timings" then
+        local signature = timingSignature()
+        if (signature or "") ~= timing.signature then requestTiming(false) end
+        local recovering = timing.pendingAt or not timing.profile or timing.profile.status == "preparing" or timing.profile.stale or timing.profile.preparing
+        if signature and elapsed - timing.lastRequestAt >= (recovering and RECOVERY_REFRESH_SECONDS or ACTIVE_REFRESH_SECONDS) then requestTiming(false) end
+    end
+    if timing.pendingAt and elapsed - timing.pendingAt >= OFFLINE_SECONDS then
+        timing.connectionState, timing.checkedAt = "timeout", nil
+        timing.status = "No timing helper reply yet. Start or update the BAR Fight helper."
+    end
 end
 
 function widget:DrawScreen()
-    if Spring.IsGUIHidden and Spring.IsGUIHidden() then hoverKey = nil; return end
+    if Spring.IsGUIHidden and Spring.IsGUIHidden() then hoverKey, timing.searching = nil, false; return end
     hits, rosterArea, detailArea, panelArea, dragArea = {}, nil, nil, nil, nil
+    timingSearchArea, timingListArea = nil, nil
     local right, top = vsx - 20, vsy - 90
     button(right - 119, top - 28, right, top, "BAR Fight", function()
         open = not open
-        if not open then dragging = false end
+        if not open then dragging, timing.searching = false, false end
     end, open)
     if not open then drawPlayerHover(); gl.Color(1, 1, 1, 1); return end
     local width, height = math.min(820, math.max(1, vsx - 40)), math.min(610, math.max(1, vsy - 140))
@@ -813,15 +1083,23 @@ function widget:DrawScreen()
     rect(left, bottom, right, top, palette.background)
     rect(left, top - 49, right, top, palette.surface)
     drawText("BAR FIGHT", left + 17, top - 24, 18, palette.accent)
-    drawText("Historical player traits", left + 147, top - 23, 12, palette.muted)
-    local remaining = math.max(0, math.ceil(REFRESH_SECONDS - (elapsed - lastRequestAt)))
+    if width >= 600 then
+        button(left + 142, top - 37, left + 210, top - 11, "Traits", function() activeTab, timing.searching = "traits", false end, activeTab == "traits")
+        button(left + 218, top - 37, left + 315, top - 11, "Build timings", function()
+            activeTab, timing.searching = "timings", false
+            if timing.signature ~= timingSignature() then requestTiming(false) end
+        end, activeTab == "timings")
+    end
+    local refreshedAt = activeTab == "timings" and timing.lastRequestAt or lastRequestAt
+    local remaining = math.max(0, math.ceil(REFRESH_SECONDS - (elapsed - refreshedAt)))
     button(right - 146, top - 37, right - 45, top - 11, remaining > 0 and ("Refresh " .. remaining .. "s") or "Refresh",
-        function() requestTraits(true) end)
-    button(right - 38, top - 37, right - 10, top - 11, "X", function() open, dragging = false, false end)
-    local statusLine = status
+        function() if activeTab == "timings" then requestTiming(true) else requestTraits(true) end end)
+    button(right - 38, top - 37, right - 10, top - 11, "X", function() open, dragging, timing.searching = false, false, false end)
+    local statusLine = activeTab == "timings" and timing.status or status
     if not supportedMap() then statusLine = "Available on Supreme Isthmus v2.1 only. No live match data is recorded." end
     drawText(fit(statusLine, width - 34, 11), left + 17, top - 69, 11, pendingAt and palette.warning or palette.muted)
     local connectionText, connectionColor = connectionLabel()
+    if activeTab == "timings" then connectionText, connectionColor = connectionLabel(timing.connectionState, timing.checkedAt) end
     local connectionWidth = math.min(width - 34, 300)
     drawText(fit(connectionText, connectionWidth, 10), left + 17, bottom + 12, 10, connectionColor)
     if width > 520 then
@@ -840,20 +1118,35 @@ function widget:DrawScreen()
     for index = rosterScroll + 1, math.min(#roster, rosterScroll + capacity) do
         local row, y = roster[index], listTop - (index - rosterScroll) * 34
         button(left + 8, y, divider - 7, y + 30, row.name,
-            function() selectedPlayer, selectedSpot, expandedTrait, traitScroll = row.player_id, nil, nil, 0 end, selectedPlayer == row.player_id)
+            function()
+                selectedPlayer, selectedSpot, expandedTrait, traitScroll = row.player_id, nil, nil, 0
+                timing.searching = false
+                if activeTab == "timings" then requestTiming(false) end
+            end, selectedPlayer == row.player_id)
         hits[#hits].player = row
         local red, green, blue
         if Spring.GetTeamColor then red, green, blue = Spring.GetTeamColor(row.team) end
         rect(left + 9, y + 1, left + 12, y + 29, red and {red, green, blue, 1} or palette.accent)
         drawText("T" .. allies[row.ally], divider - 12, y + 3, 9, palette.muted, "ro")
     end
-    drawDetails(divider + 17, listBottom, right - 17, top - 84)
+    local detailsTop = top - 84
+    if width < 600 then
+        local middle = (divider + right) / 2
+        button(divider + 8, detailsTop - 28, middle - 4, detailsTop - 2, "Traits", function() activeTab, timing.searching = "traits", false end, activeTab == "traits")
+        button(middle + 4, detailsTop - 28, right - 8, detailsTop - 2, "Build timings", function()
+            activeTab, timing.searching = "timings", false; if timing.signature ~= timingSignature() then requestTiming(false) end
+        end, activeTab == "timings")
+        detailsTop = detailsTop - 32
+    end
+    if activeTab == "timings" then drawTimings(divider + 17, listBottom, right - 17, detailsTop)
+    else drawDetails(divider + 17, listBottom, right - 17, detailsTop) end
     drawPlayerHover()
     gl.Color(1, 1, 1, 1)
 end
 
 function widget:MousePress(x, y, buttonNumber)
     if Spring.IsGUIHidden and Spring.IsGUIHidden() then return false end
+    if timing.searching and not inside(x, y, timingSearchArea) and not inside(x, y, timingListArea) then timing.searching = false end
     if buttonNumber ~= 1 then return open and inside(x, y, panelArea) or false end
     for index = #hits, 1, -1 do if inside(x, y, hits[index]) then hits[index].action(); return true end end
     if open and dragArea and inside(x, y, dragArea) then
@@ -886,6 +1179,7 @@ function widget:MouseWheel(up)
     if not open or not Spring.GetMouseState then return false end
     if Spring.IsGUIHidden and Spring.IsGUIHidden() then return false end
     local x, y = Spring.GetMouseState()
+    if timing.searching and inside(x, y, timingListArea) then timing.scroll = math.max(0, timing.scroll + (up and -1 or 1)); return true end
     if inside(x, y, rosterArea) then rosterScroll = math.max(0, rosterScroll + (up and -1 or 1)); return true end
     if inside(x, y, detailArea) then traitScroll = math.max(0, traitScroll + (up and -1 or 1)); return true end
     return false
@@ -912,9 +1206,47 @@ function widget:GetTooltip(x, y)
 end
 
 function widget:TextCommand(command)
-    if command == "barfight" then open = not open; if not open then dragging = false end; return true end
-    if command == "barfight refresh" then requestTraits(true); return true end
+    if command == "barfight" then open = not open; if not open then dragging, timing.searching = false, false end; return true end
+    if command == "barfight refresh" then if activeTab == "timings" then requestTiming(true) else requestTraits(true) end; return true end
+    local unit = command:match("^barfight timing%s+(.+)$")
+    if command == "barfight timing" or unit then
+        open, activeTab, timing.searching = true, "timings", false
+        if unit then
+            unit = textValue(unit, 100):lower()
+            local chosen
+            for _, item in ipairs(timing.units) do if item.id == unit or item.label:lower() == unit then chosen = item; break end end
+            if chosen then chooseTimingUnit(chosen)
+            elseif timingUnitID(unit) then chooseTimingUnit({id = unit, label = unit})
+            else timing.search, timing.searching, timing.scroll = unit, true, 0 end
+        end
+        if timing.signature ~= timingSignature() then requestTiming(false) end
+        return true
+    end
     return false
+end
+
+function widget:TextInput(text)
+    if not open or activeTab ~= "timings" or not timing.searching
+        or (Spring.IsGUIHidden and Spring.IsGUIHidden()) then return false end
+    timing.search, timing.scroll = textValue(timing.search .. textValue(text, 100), 100), 0
+    return true
+end
+
+function widget:KeyPress(key, modifiers)
+    if not open or activeTab ~= "timings" or not timing.searching
+        or (Spring.IsGUIHidden and Spring.IsGUIHidden()) then return false end
+    if key == 27 then timing.searching = false; return true end
+    if key == 8 then
+        local cut = #timing.search
+        while cut > 0 and timing.search:byte(cut) >= 128 and timing.search:byte(cut) <= 191 do cut = cut - 1 end
+        timing.search, timing.scroll = timing.search:sub(1, math.max(0, cut - 1)), 0
+        return true
+    end
+    if key == 13 then local matches = filteredTimingUnits(); if matches[timing.scroll + 1] then chooseTimingUnit(matches[timing.scroll + 1]) end; return true end
+    if key == 9 then timing.searching = false; return true end
+    if key == 273 or key == 274 then timing.scroll = math.max(0, timing.scroll + (key == 273 and -1 or 1)); return true end
+    -- Suppress game bindings only while this explicit search field has focus.
+    return true
 end
 
 function widget:ViewResize(x, y)

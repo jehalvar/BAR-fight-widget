@@ -20,6 +20,8 @@ except ImportError:
 SOURCE = Path(__file__).resolve().parents[1] / 'gui_bar_fight_traits.lua'
 REQUEST = 'LuaUI/Config/bar_fight_traits_request.json'
 RESPONSE = 'LuaUI/Config/bar_fight_traits_response.json'
+TIMING_REQUEST = 'LuaUI/Config/bar_fight_timings_request.json'
+TIMING_RESPONSE = 'LuaUI/Config/bar_fight_timings_response.json'
 
 ENGINE = r'''
 widget = {}
@@ -76,6 +78,15 @@ def profile(account='100', name='Historical alias', status='available', stale=Fa
                     frequency_percent=72.5, samples=20, description='Completed bombers early in 72.5% of measured games. Construction is not proof of an attack.')])])
 
 
+def timing_profile(account='100', status='available', stale=False):
+    return dict(account_id=account, name='Historical alias', status=status, stale=stale, preparing=False,
+                generated_at=1791194400, checked_at=1791198000,
+                period=dict(start_date='2026-09-06', end_date='2026-10-05'),
+                positions=[dict(spot='P2', position_name='Tech', games=30, status='available', samples=18,
+                                coverage_games=24, coverage_percent=80, occurrence_percent=75,
+                                mean_seconds=281.6, median_seconds=270, preparing=False)])
+
+
 @unittest.skipIf(LuaRuntime is None, 'Optional lupa Lua 5.1 runtime is not installed')
 class WidgetTests(unittest.TestCase):
     def setUp(self):
@@ -112,6 +123,24 @@ class WidgetTests(unittest.TestCase):
                         profiles=profiles if profiles is not None else [profile()])
         response.update(extra)
         self.globals.files[RESPONSE] = json.dumps(response)
+        self.call('Update', 1)
+
+    def timing_request(self):
+        content = self.globals.files[TIMING_REQUEST]
+        return json.loads(content) if content else None
+
+    def timing_respond(self, profiles=None, **extra):
+        request = self.timing_request()
+        response = dict(schema=1, request_id=request['request_id'], ok=True, cached=False,
+                        fetched_at=datetime.fromtimestamp(self.globals.wallTime + 1, timezone.utc).isoformat().replace('+00:00', 'Z'),
+                        map='Supreme Isthmus v2.1', method='creator-first-ready-v1', status='available',
+                        unit=dict(id=request['unit'], label='T2 constructors', kind='group'),
+                        profiles=profiles if profiles is not None else [timing_profile(request['accounts'][0])],
+                        units=[dict(id='group:t2-constructor', label='T2 constructors', kind='group'),
+                               dict(id='armack', label='Advanced Construction Bot', kind='unit'),
+                               dict(id='armfus', label='Fusion Reactor', kind='unit')])
+        response.update(extra)
+        self.globals.files[TIMING_RESPONSE] = json.dumps(response)
         self.call('Update', 1)
 
     def draw(self):
@@ -347,7 +376,8 @@ class WidgetTests(unittest.TestCase):
         self.assertIn('Click the BAR Fight button or type /barfight', message)
         self.assertIn('Choose a player and a historical position', message)
         self.assertTrue(self.click_text('BAR Fight'))
-        self.assertIn('Historical player traits', self.draw())
+        self.assertIn('Traits', self.draw())
+        self.assertIn('Build timings', self.draw())
 
     def test_combined_history_count_does_not_imply_every_game_measures_each_trait(self):
         value = profile()
@@ -802,6 +832,177 @@ class WidgetTests(unittest.TestCase):
             self.respond(ok=False, error_code=code)
             self.assertEqual(self.website_status(), 'Website: ' + label)
 
+    def test_timing_tab_requests_default_selected_account_and_copies_mean_with_position(self):
+        self.start()
+        self.assertIsNone(self.timing_request())
+        self.click_text('Build timings')
+        request = self.timing_request()
+        self.assertEqual(request['accounts'], ['100'])
+        self.assertEqual(request['map'], 'Supreme Isthmus v2.1')
+        self.assertEqual(request['unit'], 'group:t2-constructor')
+        self.assertRegex(request['request_id'], r'^[A-Za-z0-9_-]{1,80}$')
+        self.timing_respond()
+        texts = self.draw()
+        self.assertIn('4:42', texts)
+        self.assertTrue(any('Median 4:30' in text for text in texts))
+        self.assertIn('Sample: 18 first-ready games | Occurrence: 75%', texts)
+        self.assertIn('Coverage: 80% of selected games', texts)
+        self.assertTrue(any('2026-09-06 to 2026-10-05' in text for text in texts))
+        self.assertEqual(len(self.globals.clipboard), 0)
+        self.click_text('Copy timing')
+        self.assertEqual(list(self.globals.clipboard.values()), ['Current name - Tech - T2 constructors - 4:42'])
+
+    def test_timing_position_switch_uses_own_average_and_unavailable_disables_copy(self):
+        self.start(); self.call('TextCommand', 'barfight timing')
+        value = timing_profile()
+        value['positions'].extend([
+            dict(value['positions'][0], spot='P3', position_name='Air', mean_seconds=360.5, median_seconds=355),
+            dict(value['positions'][0], spot='P4', position_name='Pond', status='not_observed', samples=0,
+                 occurrence_percent=0, mean_seconds=None, median_seconds=None)])
+        self.timing_respond([value])
+        self.click_text('Air'); self.click_text('Copy timing')
+        self.assertEqual(self.globals.clipboard[1], 'Current name - Air - T2 constructors - 6:01')
+        self.click_text('Pond')
+        self.assertNotIn('Copy timing', self.draw())
+        self.assertIn('Not measured', self.draw())
+        self.assertNotIn('6:01', self.draw())
+        self.click_text('Tech'); self.click_text('Copy timing')
+        self.assertEqual(self.globals.clipboard[2], 'Current name - Tech - T2 constructors - 4:42')
+
+    def test_tabs_keep_player_and_historical_position_without_new_lookup(self):
+        self.start()
+        trait = profile('200')
+        trait['positions'] = [dict(trait['positions'][0], spot='P2', position_name='Tech'),
+                              dict(trait['positions'][0], spot='P3', position_name='Air')]
+        self.respond([profile(), trait])
+        self.click_text('Other name'); self.click_text('Air'); self.click_text('Build timings')
+        value = timing_profile('200')
+        value['positions'].append(dict(value['positions'][0], spot='P3', position_name='Air', mean_seconds=360))
+        self.timing_respond([value])
+        self.assertIn('6:00', self.draw())
+        request_id = self.timing_request()['request_id']
+        self.click_text('Traits'); self.click_text('Build timings'); self.click_text('Copy timing')
+        self.assertEqual(self.timing_request()['request_id'], request_id)
+        self.assertEqual(self.globals.clipboard[1], 'Other name - Air - T2 constructors - 6:00')
+
+    def test_search_selects_catalogue_units_and_only_captures_focused_typing(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+        self.assertFalse(self.call('TextInput', 'not captured'))
+        self.assertFalse(self.call('KeyPress', 119, self.lua.table()))
+        self.click_text('Unit: T2 constructors  [Search]')
+        self.assertTrue(self.call('TextInput', 'Fusion'))
+        self.assertIn('Fusion Reactor [armfus]', self.draw())
+        self.assertNotIn('Advanced Construction Bot [armack]', self.draw())
+        self.assertTrue(self.call('KeyPress', 13, self.lua.table()))
+        self.assertEqual(self.timing_request()['unit'], 'armfus')
+        self.assertNotIn('Copy timing', self.draw())
+        self.assertFalse(self.call('TextInput', 'not captured'))
+        self.timing_respond(unit=dict(id='armfus', label='Fusion Reactor', kind='unit'))
+        self.click_text('Copy timing')
+        self.assertEqual(self.globals.clipboard[1], 'Current name - Tech - Fusion Reactor - 4:42')
+        self.click_text('Unit: Fusion Reactor  [Search]')
+        self.assertTrue(self.call('TextInput', 'é'))
+        self.assertTrue(self.call('KeyPress', 8, self.lua.table()))
+        self.assertIn('Search:  |', self.draw())
+        self.call('KeyPress', 27, self.lua.table())
+        self.assertFalse(self.call('KeyPress', 119, self.lua.table()))
+
+    def test_timing_search_focus_releases_on_close_tab_click_outside_and_hidden_gui(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+        self.click_text('Unit: T2 constructors  [Search]'); self.click_text('Traits')
+        self.assertFalse(self.call('TextInput', 'game text'))
+        self.click_text('Build timings'); self.click_text('Unit: T2 constructors  [Search]')
+        self.call('MousePress', 5, 5, 1)
+        self.assertFalse(self.call('KeyPress', 119, self.lua.table()))
+        self.click_text('Unit: T2 constructors  [Search]'); self.call('TextCommand', 'barfight')
+        self.assertFalse(self.call('TextInput', 'game text'))
+        self.call('TextCommand', 'barfight timing'); self.click_text('Unit: T2 constructors  [Search]')
+        self.lua.execute('Spring.IsGUIHidden = function() return true end')
+        self.assertFalse(self.call('TextInput', 'game text'))
+        self.assertFalse(self.call('KeyPress', 119, self.lua.table()))
+
+    def test_timing_switch_player_invalidates_old_copy_and_rejects_late_reply(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond()
+        old_response = self.globals.files[TIMING_RESPONSE]
+        self.click_text('Other name')
+        self.assertEqual(self.timing_request()['accounts'], ['200'])
+        self.assertNotIn('Copy timing', self.draw())
+        self.globals.files[TIMING_RESPONSE] = old_response; self.call('Update', 1)
+        self.assertNotIn('Copy timing', self.draw())
+        self.timing_respond([timing_profile('100')])
+        self.assertNotIn('Copy timing', self.draw())
+        self.timing_respond([timing_profile('200')])
+        self.globals.players[2].name = 'Current renamed player'; self.call('Update', 2)
+        self.click_text('Copy timing')
+        self.assertEqual(self.globals.clipboard[1], 'Current renamed player - Tech - T2 constructors - 4:42')
+
+    def test_timing_unknown_preparing_and_invalid_evidence_never_become_zero_or_copyable(self):
+        self.start(); self.call('TextCommand', 'barfight timing')
+        for state in ('preparing', 'unavailable', 'not_observed'):
+            value = timing_profile(status=state)
+            value['positions'][0].update(status=state, samples=0, mean_seconds=None, median_seconds=None,
+                coverage_games=0 if state != 'not_observed' else 24, coverage_percent=0 if state != 'not_observed' else 80,
+                occurrence_percent=None if state != 'not_observed' else 0)
+            self.timing_respond([value])
+            self.assertNotIn('Copy timing', self.draw())
+            self.assertNotIn('0:00', self.draw())
+        for updates in (dict(mean_seconds=-1), dict(samples=25), dict(coverage_games=31),
+                        dict(mean_seconds=float('inf')), dict(status='preparing')):
+            value = timing_profile(); value['positions'][0].update(updates)
+            self.timing_respond([value])
+            self.assertNotIn('Copy timing', self.draw())
+        self.timing_respond(method='other-method')
+        self.assertNotIn('Copy timing', self.draw())
+        self.timing_respond(map='Another map')
+        self.assertNotIn('Copy timing', self.draw())
+
+    def test_timing_stale_cached_and_partial_preparation_are_visible(self):
+        self.start(); self.call('TextCommand', 'barfight timing')
+        value = timing_profile(stale=True)
+        value['positions'][0]['preparing'] = True
+        self.timing_respond([value], cached=True)
+        texts = self.draw()
+        self.assertTrue(any('Stale cache' in text for text in texts))
+        self.assertTrue(any('More history is being prepared.' in text for text in texts))
+        self.assertIn('Website: cached timings (not checked)', texts)
+        self.assertIn('Copy timing', texts)
+
+    def test_timing_map_account_guards_timeout_and_bounded_refresh(self):
+        self.start(); self.call('TextCommand', 'barfight timing')
+        original = self.timing_request()['request_id']
+        self.call('TextCommand', 'barfight refresh')
+        self.assertEqual(self.timing_request()['request_id'], original)
+        self.call('Update', 30)
+        self.assertTrue(any('No timing helper reply' in text for text in self.draw()))
+        self.assertNotIn('Copy timing', self.draw())
+        self.call('Update', 91)
+        self.assertNotEqual(self.timing_request()['request_id'], original)
+        self.globals.Game.mapName = 'Different map'
+        before = len(self.globals.written)
+        self.call('TextCommand', 'barfight timing armfus'); self.call('Update', 2)
+        self.assertEqual(len(self.globals.written), before)
+        self.assertNotIn('Copy timing', self.draw())
+
+    def test_timing_command_raw_unit_clipboard_failure_and_eight_positions_fit(self):
+        self.start(); self.call('TextCommand', 'barfight timing armack')
+        self.assertEqual(self.timing_request()['unit'], 'armack')
+        value = timing_profile()
+        value['positions'] = [dict(value['positions'][0], spot='P'+str(index+1)) for index in range(8)]
+        self.timing_respond([value], unit=dict(id='armack', label='Advanced Construction Bot', kind='unit'))
+        for width, height in ((1280, 720), (1440, 900), (1920, 1080)):
+            self.call('ViewResize', width, height)
+            texts = self.draw()
+            self.assertIn('Copy timing', texts)
+            self.assertIn('4:42', texts)
+            self.assertIn('Beach sea', texts)
+            for entry in self.globals.drawn.values():
+                self.assertGreaterEqual(entry['y'], 0)
+                self.assertLessEqual(entry['y'] + entry['size'], height)
+        self.lua.execute('Spring.SetClipboard = function() error("clipboard failed") end')
+        self.click_text('Copy timing')
+        self.assertTrue(any('Clipboard unavailable' in text for text in self.draw()))
+        self.assertEqual(len(self.globals.clipboard), 0)
+
 
 class WidgetScopeTests(unittest.TestCase):
     def test_widget_has_no_network_execution_or_game_control_calls(self):
@@ -810,7 +1011,7 @@ class WidgetScopeTests(unittest.TestCase):
                           'socket.', 'http.', 'SendCommands', 'GiveOrder', 'GetAllUnits',
                           'GetTeamUnits', 'GetUnitPosition', 'SetGameSpeed'):
             self.assertNotIn(forbidden, code)
-        self.assertEqual(set(re.findall(r'LuaUI/Config/[^"\s]+', code)), {REQUEST, RESPONSE})
+        self.assertEqual(set(re.findall(r'LuaUI/Config/[^"\s]+', code)), {REQUEST, RESPONSE, TIMING_REQUEST, TIMING_RESPONSE})
 
 
 if __name__ == '__main__':

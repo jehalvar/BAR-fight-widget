@@ -14,9 +14,36 @@ Open the panel with the BAR Fight button or `/barfight`, select a player, then s
 
 The small connection indicator at the bottom of the panel shows recent contact with the website, checks in progress, cached responses and connection problems. It also identifies when the helper has not replied or profile fetching is turned off. Saved profiles are not proof of a live connection, and a successful connection does not mean every player has enough history. The indicator uses existing helper replies and adds no network requests.
 
+## Unit ready times
+
+Select a player and historical position, then open **Build timings**. Choose a unit
+or an economy group, such as **T2 constructors**, to see when that player first
+gets one ready in their recorded games. You can also open this view with
+`/barfight timing`.
+
+**Average ready time** is the arithmetic mean of the first completion time in
+games where a completion was observed. **Typical time** is the median. These are
+times from game start. The occurrence and coverage percentages show how often the
+unit appeared and how much of the selected history could be measured. They are
+historical habits, not deadlines or predictions for this match.
+
+A unit started by this player still counts when it was handed to an ally
+unfinished and completed later. Its ready time is that later completion, not the
+handover time. Receiving another player's unit does not count as creating it.
+The T2 constructor group excludes assistance-only units such as Butlers.
+
+**Copy timing** copies the current result, for example:
+`Example player - Tech - T2 constructors - 4:42`.
+The value is the average, rounded to the nearest second. Nothing is posted to chat
+automatically. Missing or still-loading measurements cannot be copied as a time.
+
 ## Privacy controls
 
 The helper sends the supported map name and up to 16 public BAR account IDs over HTTPS to request profiles. It does not read local replay files, record gameplay, or upload replay data. The website also receives the ordinary connection information needed for HTTPS, including the source IP address.
+
+Opening Build timings also requests the selected account and unit or group from
+the same website, plus a cached unit list. The profile-fetching privacy setting
+controls these lookups too.
 
 Uncheck **Fetch player profiles from bar-fight.com** in setup to prevent these lookups. To change this later, edit `%LOCALAPPDATA%\BARFight\bar-fight.ini` (or the selected installation folder):
 

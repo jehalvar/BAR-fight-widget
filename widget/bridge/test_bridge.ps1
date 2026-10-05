@@ -41,6 +41,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw '--stop without a running instance failed.' }
 
     $requestPath = Join-Path $testConfig 'bar_fight_traits_request.json'
+    $timingRequestPath = Join-Path $testConfig 'bar_fight_timings_request.json'
+    $timingResponsePath = Join-Path $testConfig 'bar_fight_timings_response.json'
     [System.IO.File]::WriteAllText($requestPath, '{"schema":1,"request_id":"expired","map":"Supreme Isthmus v2.1","accounts":["21705"]}', [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::SetLastWriteTimeUtc($requestPath, [DateTime]::UtcNow.AddMinutes(-6))
     & $consoleExe --data-dir $testData --once
@@ -50,12 +52,14 @@ try {
 
     # A newly created/partially written request must not terminate the helper.
     [System.IO.File]::WriteAllText($requestPath, '{}', [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($timingRequestPath, '{}', [System.Text.UTF8Encoding]::new($false))
     $processArgs = @('--data-dir', ('"' + $testData + '"'))
     $primary = Start-Process -FilePath $windowlessExe -ArgumentList $processArgs -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 1300
     $primary.Refresh()
     if ($primary.HasExited) { throw 'Malformed request terminated the companion.' }
     [System.IO.File]::WriteAllText($requestPath, '{"schema":', [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($timingRequestPath, '{"schema":', [System.Text.UTF8Encoding]::new($false))
     Start-Sleep -Milliseconds 1300
     $primary.Refresh()
     if ($primary.HasExited) { throw 'Partial request terminated the companion.' }
@@ -69,6 +73,7 @@ try {
     & $consoleExe --data-dir $testData --stop
     if ($LASTEXITCODE -ne 0 -or -not $primary.WaitForExit(500) -or $primary.ExitCode -ne 0) { throw 'Clean stop did not await the instance shutdown.' }
     if (Test-Path -LiteralPath (Join-Path $testConfig 'bar_fight_traits_response.json')) { throw 'Malformed request produced a response.' }
+    if (Test-Path -LiteralPath $timingResponsePath) { throw 'Malformed timing request produced a response.' }
     if (Test-Path -LiteralPath $updateMarker) { throw 'Disabled updater was launched.' }
     [System.IO.File]::WriteAllText($installIni, "[BAR]`r`nDataDir=$testData`r`n[Updates]`r`nEnabled=1`r`n")
     Remove-Item -LiteralPath $requestPath -Force
@@ -91,11 +96,16 @@ try {
     # of the enabled updater sentinel. No profile HTTP request is needed.
     [System.IO.File]::WriteAllText($installIni, "[BAR]`r`nDataDir=$testData`r`n[Updates]`r`nEnabled=1`r`n[Privacy]`r`nFetchProfiles=0`r`n")
     [System.IO.File]::WriteAllText($requestPath, '{"schema":1,"request_id":"privacy-check","map":"Supreme Isthmus v2.1","accounts":["21705"]}', [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($timingRequestPath, '{"schema":1,"request_id":"timing-privacy-check","map":"Supreme Isthmus v2.1","accounts":["21705"],"unit":"group:t2-constructor"}', [System.Text.UTF8Encoding]::new($false))
     $privacyCheck = Start-Process -FilePath $consoleExe -ArgumentList @('--data-dir', ('"' + $testData + '"'), '--once') -WindowStyle Hidden -Wait -PassThru
     if ($privacyCheck.ExitCode -ne 2) { throw 'Profile opt-out did not report a disabled lookup.' }
     $privacyCheck.Dispose()
     $privacyResponse = Get-Content -LiteralPath (Join-Path $testConfig 'bar_fight_traits_response.json') -Raw | ConvertFrom-Json
     if ($privacyResponse.error_code -ne 'privacy-disabled' -or $privacyResponse.profiles) { throw 'Profile opt-out response is incorrect.' }
+    $timingPrivacyResponse = Get-Content -LiteralPath $timingResponsePath -Raw | ConvertFrom-Json
+    if ($timingPrivacyResponse.error_code -ne 'privacy-disabled' -or $timingPrivacyResponse.profiles -or $timingPrivacyResponse.request_id -ne 'timing-privacy-check' -or $timingPrivacyResponse.ok) {
+        throw 'Timing opt-out response is incorrect.'
+    }
     Write-Output 'Build and offline lifecycle checks passed; no HTTP requests were made.'
 }
 finally {
@@ -108,7 +118,7 @@ finally {
         $primary.Dispose()
     }
     # Delete only known test files and empty directories; never recurse over a computed path.
-    foreach ($file in @($consoleExe, $windowlessExe, (Join-Path $testRoot 'UpdaterSentinel.cs'), (Join-Path $testRoot 'BarFightUpdater.exe'), (Join-Path $testRoot 'update-requested'), (Join-Path $testRoot 'bar-fight.ini'), (Join-Path $testRoot 'update-paused'), (Join-Path $testRoot 'invalid-endpoint.stderr'), (Join-Path $testRoot 'invalid-endpoint.stdout'), (Join-Path $testConfig 'bar_fight_traits_request.json'), (Join-Path $testConfig 'bar_fight_traits_response.json'))) {
+    foreach ($file in @($consoleExe, $windowlessExe, (Join-Path $testRoot 'UpdaterSentinel.cs'), (Join-Path $testRoot 'BarFightUpdater.exe'), (Join-Path $testRoot 'update-requested'), (Join-Path $testRoot 'bar-fight.ini'), (Join-Path $testRoot 'update-paused'), (Join-Path $testRoot 'invalid-endpoint.stderr'), (Join-Path $testRoot 'invalid-endpoint.stdout'), (Join-Path $testConfig 'bar_fight_traits_request.json'), (Join-Path $testConfig 'bar_fight_traits_response.json'), (Join-Path $testConfig 'bar_fight_timings_request.json'), (Join-Path $testConfig 'bar_fight_timings_response.json'))) {
         if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
     }
     foreach ($directory in @($testConfig, (Join-Path $testData 'LuaUI'), $testData, $testRoot)) {
