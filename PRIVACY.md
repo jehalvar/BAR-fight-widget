@@ -17,6 +17,8 @@ positions, dates, sample sizes and measurement coverage. Unit codes and groups
 are URL query parameters and may appear in server logs. These lookups use the
 same profile-fetching privacy control; they do not send current build orders.
 
+For automatic selections, the widget reads starting coordinates and the starting commander definition only when BAR exposes them to the current player or spectator. This stays local; starting coordinates and commander metadata are not uploaded. The chosen unit-group ID can contain its faction, such as `group:fighter-armada`.
+
 The server and its hosting infrastructure receive the source IP address, requested URL, request time and HTTP headers, including the helper's `BARFightBridge/1.0` User-Agent. Account IDs and the map name are URL query parameters and can therefore appear in server access logs. The service can also retain requested public account IDs and request times to prioritize background profile preparation. This client policy does not set a retention period for the separately operated service's access logs.
 
 The client does not upload replay files, local game history, chat, player commands, screenshots or local filesystem paths. It does not record gameplay or run replay simulations. It uses the game's current roster to identify accounts; public replay analysis happens separately on the service.

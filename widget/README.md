@@ -32,6 +32,12 @@ unfinished and completed later. Its ready time is that later completion, not the
 handover time. Receiving another player's unit does not count as creating it.
 The T2 constructor group excludes assistance-only units such as Butlers.
 
+Quick choices are available for Geo sea / Beach sea (combat sub, T1 shipyard, destroyer), Tech (T2 constructor, fusion, advanced fusion), both Front positions (T1 factory), Geo tech (Starlight, Mauser, Quaker, Liche, advanced geothermal), and Air (fusion, conventional bomber, fighter). These measure first completion, including unfinished allied handovers.
+
+On standard human 8v8 Supreme Isthmus v2.1 matches, the widget selects the nearest recorded starting spot when the engine makes it available. Mirrored starts are combined. It reads the selected starting commander to choose Armada, Cortex or Legion; the lobby's default faction is not used. Hidden enemy information, unresolved random factions and ambiguous starts remain unknown. Full-view spectators can inspect the information exposed by their spectator view.
+
+Click the position or faction control to change it, or return to automatic selection. Manual choices last for this widget session and player/team. If a start is unavailable, the most-played historical position is labelled **history**, not **auto**. **All factions** restores every standard unit choice. The faction filter narrows the selected units (including group members), not which historical games are included.
+
 **Copy timing** copies the current result, for example:
 `Example player - Tech - T2 constructors - 4:42`.
 The value is the average, rounded to the nearest second. Nothing is posted to chat

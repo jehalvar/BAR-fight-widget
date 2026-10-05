@@ -30,6 +30,23 @@ local POSITION_NAMES = {
     P1 = "Geo sea", P2 = "Tech", P3 = "Air", P4 = "Pond",
     P5 = "Front (suicide)", P6 = "Front (second)", P7 = "Geo tech", P8 = "Beach sea",
 }
+local FACTION_NAMES = {armada = "Armada", cortex = "Cortex", legion = "Legion", all = "All factions"}
+-- The same verified Supreme Isthmus v2.1 spawn centres and 900-unit matching
+-- radius used by the website. A role describes a start, not a current job.
+local SPAWNS = {
+    {711,7218}, {837,10407}, {2155,11747}, {2513,7983},
+    {4595,7440}, {4997,8570}, {4375,9800}, {4814,11077},
+    {11579,5063}, {11456,1901}, {10129,541}, {9764,4339},
+    {7729,4835}, {7292,3727}, {7925,2500}, {7492,1220},
+}
+local QUICK_TIMINGS = {
+    sea = {{"First sub", "group:combat-sub"}, {"Shipyard ready", "group:t1-shipyard"}, {"First destroyer", "group:destroyer"}},
+    tech = {{"First T2 con", "group:t2-constructor"}, {"First Fusion", "group:fusion"}, {"First Advanced Fusion", "group:advanced-fusion"}},
+    front = {{"T1 factory ready", "group:t1-factory"}},
+    geo = {{"First Starlight", "armmanni"}, {"First Mauser", "armmart"}, {"First Quaker", "cormart"}, {"First Liche", "armliche"}, {"Advanced Geo ready", "group:advanced-geo"}},
+    air = {{"First Fusion", "group:fusion"}, {"First bomber", "group:conventional-bomber"}, {"First fighter", "group:fighter"}},
+}
+local QUICK_ROLES = {P1 = "sea", P2 = "tech", P3 = "air", P5 = "front", P6 = "front", P7 = "geo", P8 = "sea"}
 local ID_KEYS = {
     "user_id", "userid", "userID", "account_id", "accountid", "accountID",
     "teiserver_user_id", "teiserverUserId", "chobbyUserId",
@@ -249,6 +266,8 @@ end
 local elapsed, rosterTimer, responseTimer = 0, 0, 0
 local open, roster, accounts, requestedAccounts, profiles = false, {}, {}, {}, {}
 local selectedPlayer, selectedSpot, expandedTrait = nil, nil, nil
+local matchSelections, timingMenu, timingMenuArea = {}, nil, nil
+local contextMap, contextFrame, selectedContextKey, selectedAutoSpot
 local activeTab = "traits"
 local timing = {unit = "group:t2-constructor", label = "T2 constructors", units = {
     {id = "group:t2-constructor", label = "T2 constructors", kind = "group"}},
@@ -286,6 +305,7 @@ local function setTimingSearchFocus(focused)
             return false
         end
         timing.searching = true
+        timingMenu = nil
         searchPressedKeys = {}
         searchHeldKeys = Spring.GetPressedKeys and Spring.GetPressedKeys() or {}
         if Spring.SDLStartTextInput then Spring.SDLStartTextInput() end
@@ -296,6 +316,71 @@ local function setTimingSearchFocus(focused)
         if released and Spring.SDLStopTextInput then Spring.SDLStopTextInput() end
     end
     return focused
+end
+
+local function selectionFor(row)
+    if not row then return {} end
+    local key = (row.account_id or tostring(row.player_id)) .. ":" .. row.team
+    if not matchSelections[key] then matchSelections[key] = {} end
+    return matchSelections[key]
+end
+
+local function factionFor(row)
+    return selectionFor(row).faction or (row and row.startFaction) or "all"
+end
+
+local function updateStartContext(rows)
+    local frame = Spring.GetGameFrame and Spring.GetGameFrame()
+    if contextMap ~= nil and (contextMap ~= Game.mapName or (frame and contextFrame and frame < contextFrame)) then
+        matchSelections, selectedSpot, timingMenu = {}, nil, nil
+    end
+    contextMap, contextFrame = Game.mapName, frame
+    local validLayout = supportedMap() and Game.mapSizeX == 12288 and Game.mapSizeZ == 12288 and #rows == 16
+    local teams, allies, counts = {}, {}, {}
+    for _, row in ipairs(rows) do
+        if teams[row.team] then validLayout = false end
+        teams[row.team] = true
+        allies[row.ally] = (allies[row.ally] or 0) + 1
+        if Spring.GetTeamInfo then
+            local _, _, _, isAI = Spring.GetTeamInfo(row.team, false)
+            if isAI ~= false then validLayout = false end
+        else validLayout = false end
+        -- startUnit reflects the chosen faction; GetTeamInfo's side is only a
+        -- lobby default. Enemy values may be hidden by the engine: leave unknown.
+        local startUnit = Spring.GetTeamRulesParam and Spring.GetTeamRulesParam(row.team, "startUnit")
+        local definition = UnitDefs and UnitDefs[tonumber(startUnit)]
+        local name = definition and definition.name
+        row.startFaction = name == "armcom" and "armada" or name == "corcom" and "cortex" or name == "legcom" and "legion" or nil
+    end
+    local allyCount = 0
+    for _, count in pairs(allies) do allyCount = allyCount + 1; if count ~= 8 then validLayout = false end end
+    if allyCount ~= 2 then validLayout = false end
+    if Spring.GetTeamList and Spring.GetGaiaTeamID then
+        local total, gaia = 0, Spring.GetGaiaTeamID()
+        for _, team in ipairs(Spring.GetTeamList()) do
+            if team ~= gaia then total = total + 1; if not teams[team] then validLayout = false end end
+        end
+        if total ~= 16 then validLayout = false end
+    else validLayout = false end
+    if not validLayout or not Spring.GetTeamStartPosition then return end
+    for _, row in ipairs(rows) do
+        local x, _, z, valid = Spring.GetTeamStartPosition(row.team)
+        if valid == true and type(x) == "number" and type(z) == "number" and x == x and z == z
+            and x >= 0 and x <= 12288 and z >= 0 and z <= 12288 and not (x == 0 and z == 0) then
+            local best, distance, tied
+            for index, point in ipairs(SPAWNS) do
+                local d = (x - point[1])^2 + (z - point[2])^2
+                if not distance or d < distance - 0.000001 then best, distance, tied = index, d, false
+                elseif math.abs(d - distance) <= 0.000001 then tied = true end
+            end
+            if best and not tied and distance <= 900^2 then
+                row.startIndex = best; counts[best] = (counts[best] or 0) + 1
+            end
+        end
+    end
+    for _, row in ipairs(rows) do
+        if row.startIndex and counts[row.startIndex] == 1 then row.startSpot = "P" .. ((row.startIndex - 1) % 8 + 1) end
+    end
 end
 
 local function requestTraits(manual)
@@ -347,6 +432,7 @@ local function refreshRoster()
         if row.account_id and occurrences[row.account_id] == 1 then ids[row.account_id] = true
         else row.account_id = nil end
     end
+    updateStartContext(rows)
     table.sort(rows, function(a, b)
         if a.ally ~= b.ally then return a.ally < b.ally end
         if a.team ~= b.team then return a.team < b.team end
@@ -356,6 +442,15 @@ local function refreshRoster()
     for _, row in ipairs(rows) do if row.player_id == selectedPlayer then selectedExists = true end end
     if not selectedExists then selectedPlayer = rows[1] and rows[1].player_id; selectedSpot, expandedTrait = nil, nil end
     roster = rows
+    for _, row in ipairs(rows) do
+        if row.player_id == selectedPlayer then
+            local choice = selectionFor(row)
+            local key = (row.account_id or tostring(row.player_id)) .. ":" .. row.team
+            if selectedContextKey ~= key or (selectedAutoSpot and not row.startSpot and not choice.spot) then selectedSpot = nil end
+            if choice.spot or row.startSpot then selectedSpot = choice.spot or row.startSpot end
+            selectedContextKey, selectedAutoSpot = key, row.startSpot
+        end
+    end
     local ordered = {}
     for id in pairs(ids) do ordered[#ordered + 1] = id end
     table.sort(ordered, function(a, b) return tonumber(a) < tonumber(b) end)
@@ -558,6 +653,31 @@ local function selectedRow()
     for _, row in ipairs(roster) do if row.player_id == selectedPlayer then return row end end
 end
 
+local function selectPosition(spot)
+    local row = selectedRow()
+    selectionFor(row).spot = spot
+    selectedSpot = spot or (row and row.startSpot)
+    expandedTrait, traitScroll, timing.copied, timingMenu = nil, 0, false, nil
+end
+
+local function unitFaction(item)
+    if item.faction and FACTION_NAMES[item.faction] then return item.faction end
+    local prefix = item.id:sub(1, 3)
+    return prefix == "arm" and "armada" or prefix == "cor" and "cortex" or prefix == "leg" and "legion" or "all"
+end
+
+local function unitMatchesFaction(item, faction)
+    if faction == "all" then return item.kind ~= "group" or not item.base_id or item.base_id == item.id end
+    return unitFaction(item) == faction or (item.kind == "group" and not item.faction and not item.base_id)
+end
+
+local function resolveTimingUnit(base)
+    local faction = factionFor(selectedRow())
+    for _, item in ipairs(timing.units) do
+        if (item.base_id or item.id) == base and unitMatchesFaction(item, faction) then return item end
+    end
+end
+
 local function timingUnitID(value)
     if type(value) ~= "string" or #value > 100 then return nil end
     if value:match("^[a-z][a-z0-9_]*$") or value:match("^group:[a-z][a-z0-9%-]*$") then return value end
@@ -679,7 +799,10 @@ local function pollTimingResponse()
             if type(item) ~= "table" or not timingUnitID(item.id) or seen[item.id]
                 or textValue(item.label, 100) == "" or (item.kind ~= "group" and item.kind ~= "unit") then units = nil; break end
             seen[item.id] = true
-            units[#units + 1] = {id = item.id, label = textValue(item.label, 100), kind = item.kind}
+            if (item.faction ~= nil and not FACTION_NAMES[item.faction])
+                or (item.base_id ~= nil and not timingUnitID(item.base_id)) then units = nil; break end
+            units[#units + 1] = {id = item.id, label = textValue(item.label, 100), kind = item.kind,
+                faction = item.faction, base_id = item.base_id}
         end
         if units then timing.units = units end
     end
@@ -715,15 +838,35 @@ end
 local function filteredTimingUnits()
     local result, query = {}, timing.search:lower()
     for _, item in ipairs(timing.units) do
-        if query == "" or item.label:lower():find(query, 1, true) or item.id:lower():find(query, 1, true) then result[#result + 1] = item end
+        if unitMatchesFaction(item, factionFor(selectedRow()))
+            and (query == "" or item.label:lower():find(query, 1, true) or item.id:lower():find(query, 1, true)) then result[#result + 1] = item end
     end
     return result
 end
 
 local function chooseTimingUnit(item)
     setTimingSearchFocus(false)
+    timing.base = item.base_id or item.id
     timing.unit, timing.label, timing.search, timing.scroll, timing.copied = item.id, item.label, "", 0, false
     requestTiming(false)
+end
+
+local function quickTimingChoices()
+    local result = {}
+    for _, preset in ipairs(QUICK_TIMINGS[QUICK_ROLES[selectedSpot]] or {}) do
+        local unit = resolveTimingUnit(preset[2])
+        if unit then result[#result + 1] = {label = preset[1], unit = unit} end
+    end
+    return result
+end
+
+local function alignTimingFaction()
+    local item = resolveTimingUnit(timing.base or "group:t2-constructor")
+    if not item then
+        local presets = quickTimingChoices()
+        item = presets[1] and presets[1].unit or resolveTimingUnit("group:t2-constructor")
+    end
+    if item and item.id ~= timing.unit then chooseTimingUnit(item) end
 end
 
 local function copyProfileLink(account)
@@ -895,7 +1038,7 @@ local function drawDetails(x1, bottom, x2, top)
     end
     local position
     for _, candidate in ipairs(profile.positions) do if candidate.spot == selectedSpot then position = candidate end end
-    if not position then
+    if not position and not selectedSpot then
         for _, candidate in ipairs(profile.positions) do if not position or candidate.games > position.games then position = candidate end end
         selectedSpot = position.spot
     end
@@ -905,9 +1048,13 @@ local function drawDetails(x1, bottom, x2, top)
         local col, line = (index - 1) % 2, math.floor((index - 1) / 2)
         local chipX, chipY = x1 + col * (chipWidth + 8), contentTop - 91 - line * 29
         button(chipX, chipY, chipX + chipWidth, chipY + 25, candidate.position_name,
-            function() selectedSpot, expandedTrait, traitScroll = candidate.spot, nil, 0 end, candidate.spot == selectedSpot)
+            function() selectPosition(candidate.spot) end, candidate.spot == selectedSpot)
     end
     local y = contentTop - 93 - math.ceil(#profile.positions / 2) * 29
+    if not position then
+        drawText("No history for " .. (POSITION_NAMES[selectedSpot] or "this position") .. ". Choose another role above.", x1, y, 11, palette.muted)
+        return
+    end
     drawText(tostring(position.games) .. " recorded games for this position", x1, y, 11, palette.muted)
     y = y - 18
     if position.status == "preparing" or position.preparing or profile.preparing then
@@ -962,31 +1109,48 @@ local function drawTimings(x1, bottom, x2, top)
         drawText(fit("No stable account ID supplied by this match.", x2 - x1, 12), x1, top - 48, 12, palette.warning); return
     end
     drawText("Account " .. row.account_id .. " | Historical build timings", x1, top - 40, 11, palette.muted)
-    timingSearchArea = {x1, top - 73, x2, top - 46}
-    button(x1, top - 73, x2, top - 46,
+    local profile = timing.signature == timingSignature() and timing.profile or nil
+    local history = profile or profiles[row.account_id]
+    local positions = history and history.positions or {}
+    local choice = selectionFor(row)
+    if selectedSpot == nil then
+        selectedSpot = choice.spot or row.startSpot
+        if selectedSpot == nil then
+            local best
+            for _, item in ipairs(positions) do if not best or item.games > best.games then best = item end end
+            if best then selectedSpot = best.spot end
+        end
+    end
+    local middle = (x1 + x2) / 2
+    local source = choice.spot and "manual" or row.startSpot and "auto" or "history"
+    local positionLabel = selectedSpot and (POSITION_NAMES[selectedSpot] .. " (" .. source .. ")") or "Choose position"
+    local faction = factionFor(row)
+    local factionLabel = FACTION_NAMES[faction] .. (choice.faction and "" or row.startFaction and " (auto)" or " (unknown)")
+    button(x1, top - 74, middle - 4, top - 48, positionLabel, function()
+        setTimingSearchFocus(false); timingMenu = timingMenu == "position" and nil or "position"
+    end, timingMenu == "position")
+    button(middle + 4, top - 74, x2, top - 48, factionLabel, function()
+        setTimingSearchFocus(false); timingMenu = timingMenu == "faction" and nil or "faction"
+    end, timingMenu == "faction")
+    drawText("Quick ready times - " .. (POSITION_NAMES[selectedSpot] or "choose a position"), x1, top - 91, 11, palette.muted)
+    local quick = quickTimingChoices()
+    local columns = x2 - x1 >= 510 and 3 or 2
+    local rows = math.max(1, math.ceil(#quick / columns))
+    local width = (x2 - x1 - (columns - 1) * 6) / columns
+    for index, preset in ipairs(quick) do
+        local column, line = (index - 1) % columns, math.floor((index - 1) / columns)
+        local bx, by = x1 + column * (width + 6), top - 121 - line * 29
+        button(bx, by, bx + width, by + 25, preset.label, function() chooseTimingUnit(preset.unit) end, timing.unit == preset.unit.id)
+    end
+    if #quick == 0 then drawText(fit("Use unit search for more choices.", x2-x1, 11), x1, top - 116, 11, palette.muted) end
+    local searchTop = top - 104 - rows * 29
+    timingSearchArea = {x1, searchTop - 27, x2, searchTop}
+    button(x1, searchTop - 27, x2, searchTop,
         timing.searching and ("Search: " .. timing.search .. " |") or ("Unit: " .. timing.label .. "  [Search]"),
         function()
             if not timing.searching and setTimingSearchFocus(true) then timing.search, timing.scroll = "", 0 end
         end, timing.searching)
-    local profile = timing.signature == timingSignature() and timing.profile or nil
-    local history = profile or profiles[row.account_id]
-    local positions = history and history.positions or {}
-    if selectedSpot == nil then
-        local best
-        for _, item in ipairs(positions) do if not best or item.games > best.games then best = item end end
-        if best then selectedSpot = best.spot end
-    end
-    drawText("Historical position - choose a role to inspect", x1, top - 92, 12, palette.muted)
-    local chipWidth = math.max(1, (x2 - x1 - 8) / 2)
-    for index, item in ipairs(positions) do
-        local column, line = (index - 1) % 2, math.floor((index - 1) / 2)
-        local chipX, chipY = x1 + column * (chipWidth + 8), top - 122 - line * 28
-        if chipY >= bottom then
-            button(chipX, chipY, chipX + chipWidth, chipY + 24, item.position_name,
-                function() selectedSpot, timing.copied = item.spot, false end, item.spot == selectedSpot)
-        end
-    end
-    local y = top - 128 - math.ceil(#positions / 2) * 28
+    local y = searchTop - 45
     local function line(value, offset, size, color)
         if y - offset >= bottom then drawText(fit(value, x2 - x1, size), x1, y - offset, size, color or palette.muted) end
     end
@@ -1021,20 +1185,48 @@ local function drawTimings(x1, bottom, x2, top)
     -- Draw the search dropdown last so its hitboxes cover the result beneath it.
     if timing.searching then
         local matches = filteredTimingUnits()
-        local capacity = math.max(1, math.min(8, math.floor((top - 105 - bottom) / 27)))
+        local capacity = math.max(1, math.min(8, math.floor((searchTop - 54 - bottom) / 27)))
         timing.scroll = math.max(0, math.min(timing.scroll, math.max(0, #matches - capacity)))
         local count = math.min(capacity, #matches)
-        local listBottom = top - 77 - math.max(1, count) * 27 - 23
-        timingListArea = {x1, listBottom, x2, top - 76}
-        rect(x1, listBottom, x2, top - 76, palette.background)
-        if count == 0 then drawText("No matching units", x1 + 8, top - 98, 12, palette.muted) end
+        local listTop = searchTop - 31
+        local listBottom = listTop - math.max(1, count) * 27 - 23
+        timingListArea = {x1, listBottom, x2, listTop + 1}
+        rect(x1, listBottom, x2, listTop + 1, palette.background)
+        if count == 0 then drawText("No matching units", x1 + 8, listTop - 21, 12, palette.muted) end
         for index = timing.scroll + 1, math.min(#matches, timing.scroll + capacity) do
-            local item, itemTop = matches[index], top - 77 - (index - timing.scroll - 1) * 27
+            local item, itemTop = matches[index], listTop - (index - timing.scroll - 1) * 27
             button(x1 + 2, itemTop - 25, x2 - 2, itemTop, item.label .. (item.kind == "group" and " (group)" or (" [" .. item.id .. "]")),
                 function() chooseTimingUnit(item) end, item.id == timing.unit)
         end
         drawText(fit(#matches .. " matches | Scroll to browse | Enter selects top | Esc closes", x2 - x1 - 16, 10),
             x1 + 8, listBottom + 6, 10, palette.muted)
+    end
+    if timingMenu then
+        local options = {}
+        if timingMenu == "position" then
+            options[#options + 1] = {label = "Use starting position (auto)", action = function() selectPosition(nil) end}
+            for number = 1, 8 do
+                local spot = "P" .. number
+                options[#options + 1] = {label = POSITION_NAMES[spot], action = function() selectPosition(spot) end}
+            end
+        else
+            options[#options + 1] = {label = "Use starting faction (auto)", action = function()
+                choice.faction, timingMenu = nil, nil; alignTimingFaction()
+            end}
+            for _, value in ipairs({"all", "armada", "cortex", "legion"}) do
+                local factionChoice = value
+                options[#options + 1] = {label = FACTION_NAMES[value], action = function()
+                    choice.faction, timingMenu = factionChoice, nil; alignTimingFaction()
+                end}
+            end
+        end
+        local menuBottom = top - 79 - #options * 27
+        timingMenuArea = {x1, menuBottom, x2, top - 77}
+        rect(x1, menuBottom, x2, top - 77, palette.background)
+        for index, item in ipairs(options) do
+            local by = top - 79 - index * 27
+            button(x1 + 2, by + 1, x2 - 2, by + 26, item.label, item.action)
+        end
     end
 end
 
@@ -1069,6 +1261,7 @@ function widget:Update(dt)
         requestTraits(false)
     end
     if open and activeTab == "timings" then
+        alignTimingFaction()
         local signature = timingSignature()
         if (signature or "") ~= timing.signature then requestTiming(false) end
         local recovering = timing.pendingAt or not timing.profile or timing.profile.status == "preparing" or timing.profile.stale or timing.profile.preparing
@@ -1083,7 +1276,7 @@ end
 function widget:DrawScreen()
     if Spring.IsGUIHidden and Spring.IsGUIHidden() then hoverKey = nil; setTimingSearchFocus(false); return end
     hits, rosterArea, detailArea, panelArea, dragArea = {}, nil, nil, nil, nil
-    timingSearchArea, timingListArea = nil, nil
+    timingSearchArea, timingListArea, timingMenuArea = nil, nil, nil
     local right, top = vsx - 20, vsy - 90
     button(right - 119, top - 28, right, top, "BAR Fight", function()
         open = not open
@@ -1149,7 +1342,8 @@ function widget:DrawScreen()
         local row, y = roster[index], listTop - (index - rosterScroll) * 34
         button(left + 8, y, divider - 7, y + 30, row.name,
             function()
-                selectedPlayer, selectedSpot, expandedTrait, traitScroll = row.player_id, nil, nil, 0
+                selectedPlayer, selectedSpot, expandedTrait, traitScroll = row.player_id, selectionFor(row).spot or row.startSpot, nil, 0
+                timingMenu = nil
                 setTimingSearchFocus(false)
                 if activeTab == "timings" then requestTiming(false) end
             end, selectedPlayer == row.player_id)
@@ -1177,6 +1371,7 @@ end
 function widget:MousePress(x, y, buttonNumber)
     if Spring.IsGUIHidden and Spring.IsGUIHidden() then return false end
     if timing.searching and not inside(x, y, timingSearchArea) and not inside(x, y, timingListArea) then setTimingSearchFocus(false) end
+    if timingMenu and not inside(x, y, timingMenuArea) then timingMenu = nil end
     if buttonNumber ~= 1 then return open and inside(x, y, panelArea) or false end
     for index = #hits, 1, -1 do if inside(x, y, hits[index]) then hits[index].action(); return true end end
     if open and dragArea and inside(x, y, dragArea) then

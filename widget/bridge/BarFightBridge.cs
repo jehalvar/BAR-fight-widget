@@ -717,7 +717,28 @@ internal static class BarFightBridge
         Dictionary<string, object> unit = Obj(value);
         string id = UnitId(Field(unit, "id")), kind = Text(Field(unit, "kind"), 10);
         if (kind != "unit" && kind != "group" || (kind == "group") != id.StartsWith("group:", StringComparison.Ordinal)) throw Invalid();
-        return new Dictionary<string, object> { {"id", id}, {"label", SingleLine(Field(unit, "label"), 160)}, {"kind", kind} };
+        Dictionary<string, object> clean = new Dictionary<string, object> { {"id", id}, {"label", SingleLine(Field(unit, "label"), 160)}, {"kind", kind} };
+        object optional;
+        if (unit.TryGetValue("base_id", out optional)) clean["base_id"] = UnitId(optional);
+        if (unit.TryGetValue("faction", out optional))
+        {
+            string faction = Text(optional, 10);
+            if (faction != "armada" && faction != "cortex" && faction != "legion" && faction != "all") throw Invalid();
+            clean["faction"] = faction;
+        }
+        if (unit.TryGetValue("factions", out optional))
+        {
+            List<object> factions = new List<object>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (object raw in Array(optional, 3))
+            {
+                string faction = Text(raw, 10);
+                if (faction != "armada" && faction != "cortex" && faction != "legion" || !seen.Add(faction)) throw Invalid();
+                factions.Add(faction);
+            }
+            clean["factions"] = factions;
+        }
+        return clean;
     }
 
     static Dictionary<string, object> ValidateCatalog(string json)
@@ -1040,6 +1061,13 @@ internal static class BarFightBridge
         rejects(delegate { ValidateTimingResponse(server.Replace("\"id\":\"group:t2-constructor\"", "\"id\":\"group:t2-air\""), request); });
         string catalog = "{\"schema\":1,\"status\":\"available\",\"default_unit\":\"group:t2-constructor\",\"units\":[" + unit + "]}";
         check(ValidateCatalog(catalog).ContainsKey("units"));
+        string factionUnit = "{\"id\":\"group:t2-constructor-armada\",\"kind\":\"group\",\"label\":\"T2 constructors (Armada)\",\"base_id\":\"group:t2-constructor\",\"faction\":\"armada\",\"factions\":[\"armada\"]}";
+        Dictionary<string, object> factionClean = CleanUnit(Serializer(MaxResponseBytes).DeserializeObject(factionUnit));
+        check((string)factionClean["faction"] == "armada" && (string)factionClean["base_id"] == "group:t2-constructor" && ((List<object>)factionClean["factions"]).Count == 1);
+        rejects(delegate { CleanUnit(Serializer(MaxResponseBytes).DeserializeObject(factionUnit.Replace("\"faction\":\"armada\"", "\"faction\":\"unknown\""))); });
+        rejects(delegate { CleanUnit(Serializer(MaxResponseBytes).DeserializeObject(factionUnit.Replace("[\"armada\"]", "[\"armada\",\"armada\"]"))); });
+        rejects(delegate { CleanUnit(Serializer(MaxResponseBytes).DeserializeObject(factionUnit.Replace("[\"armada\"]", "[\"scavengers\"]"))); });
+        rejects(delegate { CleanUnit(Serializer(MaxResponseBytes).DeserializeObject(factionUnit.Replace("\"base_id\":\"group:t2-constructor\"", "\"base_id\":\"../invalid\""))); });
         rejects(delegate { ValidateCatalog(catalog.Replace("[" + unit + "]", "[" + unit + "," + unit + "]")); });
         rejects(delegate { ValidateCatalog(catalog.Replace("\"default_unit\":\"group:t2-constructor\"", "\"default_unit\":\"armack\"")); });
         Uri endpoint = ServiceUri(new Uri(DefaultEndpoint), TimingPath);

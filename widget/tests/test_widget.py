@@ -114,6 +114,24 @@ def timing_profile(account='100', status='available', stale=False):
                                 mean_seconds=281.6, median_seconds=270, preparing=False)])
 
 
+def quick_catalogue():
+    groups = [('t2-constructor', 'T2 constructors'), ('fusion', 'Fusion reactors'),
+              ('advanced-fusion', 'Advanced fusion reactors'), ('advanced-geo', 'Advanced geothermal powerplants'),
+              ('combat-sub', 'Combat submarines'), ('t1-shipyard', 'T1 shipyards'), ('destroyer', 'Destroyers'),
+              ('t1-factory', 'T1 factories'), ('conventional-bomber', 'Conventional bombers'), ('fighter', 'Fighters')]
+    units = []
+    for key, label in groups:
+        base = 'group:' + key
+        units.append(dict(id=base, base_id=base, label=label, kind='group', faction='all'))
+        for faction in ('armada', 'cortex', 'legion'):
+            units.append(dict(id=base + '-' + faction, base_id=base, label=label + ' · ' + faction.title(), kind='group', faction=faction))
+    for code, label, faction in [('armmanni', 'Starlight', 'armada'), ('armmart', 'Mauser', 'armada'),
+                                 ('cormart', 'Quaker', 'cortex'), ('armliche', 'Liche', 'armada'),
+                                 ('armfus', 'Fusion Reactor', 'armada'), ('corfus', 'Fusion Reactor', 'cortex')]:
+        units.append(dict(id=code, base_id=code, label=label, kind='unit', faction=faction))
+    return units
+
+
 @unittest.skipIf(LuaRuntime is None, 'Optional lupa Lua 5.1 runtime is not installed')
 class WidgetTests(unittest.TestCase):
     def setUp(self):
@@ -181,6 +199,136 @@ class WidgetTests(unittest.TestCase):
             if entry['text'] == text:
                 return self.call('MousePress', entry['x'] + 4, entry['y'] + 3, 1)
         self.fail(f'No drawn text {text!r}')
+
+    def choose_timing_position(self, label):
+        texts = self.draw()
+        current = next(text for text in texts if text == 'Choose position'
+                       or text.endswith((' (history)', ' (manual)'))
+                       or text.endswith(' (auto)') and not text.startswith(('Armada', 'Cortex', 'Legion')))
+        self.click_text(current)
+        self.click_text(label)
+
+    def standard_match(self, faction='armada'):
+        for i in range(3, 17):
+            self.add_player(i, 'Player ' + str(i), str(i * 100), 0 if i <= 8 else 1)
+        self.globals.players[2]['ally'] = 0
+        self.lua.execute('''
+            Game.mapSizeX, Game.mapSizeZ = 12288, 12288
+            starts = {{837,10407},{711,7218},{2155,11747},{2513,7983},
+                      {4595,7440},{4997,8570},{4375,9800},{4814,11077},
+                      {11579,5063},{11456,1901},{10129,541},{9764,4339},
+                      {7729,4835},{7292,3727},{7925,2500},{7492,1220}}
+            UnitDefs = {[1]={name='armcom'},[2]={name='corcom'},[3]={name='legcom'},[4]={name='dummycom'}}
+            currentFrame, startUnit = 1000, 1
+            Spring.GetGameFrame = function() return currentFrame end
+            Spring.GetTeamInfo = function(team) return team,team,false,false,'Armada' end
+            Spring.GetTeamList = function() local r={};for i=1,16 do r[i]=i end;r[17]=99;return r end
+            Spring.GetGaiaTeamID = function() return 99 end
+            Spring.GetTeamRulesParam = function(team,key) if key=='startUnit' then return startUnit end end
+            Spring.GetTeamStartPosition = function(team) local p=starts[team];return p[1],0,p[2],true end
+        ''')
+        self.globals.startUnit = {'armada': 1, 'cortex': 2, 'legion': 3, 'random': 4}[faction]
+
+    def test_live_start_role_and_faction_override_lobby_default_and_history(self):
+        self.standard_match('cortex'); self.start(); self.call('TextCommand', 'barfight timing')
+        value = timing_profile()
+        value['positions'].append(dict(value['positions'][0], spot='P8', position_name='Beach sea', games=90))
+        self.timing_respond([value], units=quick_catalogue())
+        self.assertIn('Tech (auto)', self.draw())
+        self.assertIn('Cortex (auto)', self.draw())
+        self.assertEqual(self.timing_request()['unit'], 'group:t2-constructor-cortex')
+        self.click_text('First Fusion')
+        self.assertEqual(self.timing_request()['unit'], 'group:fusion-cortex')
+        self.choose_timing_position('Geo tech')
+        self.assertIn('First Quaker', self.draw())
+        self.assertNotIn('First Mauser', self.draw())
+        self.call('Update', 3)
+        self.assertIn('Geo tech (manual)', self.draw())
+        self.click_text('Cortex (auto)'); self.click_text('Armada')
+        self.assertIn('First Starlight', self.draw())
+        self.assertNotIn('First Quaker', self.draw())
+        self.click_text('First Liche')
+        self.assertEqual(self.timing_request()['unit'], 'armliche')
+        self.call('Update', 3)
+        self.assertIn('Armada', self.draw())
+        self.click_text('Armada'); self.click_text('Use starting faction (auto)')
+        self.assertIn('Cortex (auto)', self.draw())
+
+    def test_mirrored_starts_and_unreadable_or_ambiguous_metadata(self):
+        self.standard_match(); self.start(); self.call('TextCommand', 'barfight timing')
+        self.timing_respond(units=quick_catalogue())
+        self.click_text('Player 10')
+        self.assertIn('Tech (auto)', self.draw())
+        self.click_text('Current name')
+        self.lua.execute('Spring.GetTeamStartPosition=function() return nil end; Spring.GetTeamRulesParam=function() return nil end')
+        self.call('Update', 3)
+        self.assertIn('All factions (unknown)', self.draw())
+        self.assertNotIn('Armada (auto)', self.draw())
+        for mode in ('duplicate', 'outside', 'invalid', 'ai', 'random', 'map'):
+            with self.subTest(mode=mode):
+                self.setUp(); self.standard_match()
+                changes = {'duplicate': 'starts[2]=starts[1]', 'outside': 'starts[1]={6000,6000}',
+                           'invalid': 'Spring.GetTeamStartPosition=function() return 837,0,10407,false end',
+                           'ai': 'Spring.GetTeamInfo=function(t) return t,t,false,true end',
+                           'random': 'startUnit=4', 'map': 'Game.mapSizeX=10000'}
+                self.lua.execute(changes[mode]); self.start(); self.call('TextCommand', 'barfight timing')
+                self.timing_respond(units=quick_catalogue())
+                if mode != 'random': self.assertNotIn('Tech (auto)', self.draw())
+                else: self.assertIn('All factions (unknown)', self.draw())
+
+    def test_quick_choices_search_filter_and_manual_faction_restore(self):
+        self.start(); self.call('TextCommand', 'barfight timing'); self.timing_respond(units=quick_catalogue())
+        for role, label, expected in [('Geo sea','First sub','group:combat-sub'),
+                                     ('Beach sea','Shipyard ready','group:t1-shipyard'),
+                                     ('Beach sea','First destroyer','group:destroyer'),
+                                     ('Front (suicide)','T1 factory ready','group:t1-factory'),
+                                     ('Front (second)','T1 factory ready','group:t1-factory'),
+                                     ('Geo tech','First Starlight','armmanni'),
+                                     ('Geo tech','First Mauser','armmart'),
+                                     ('Geo tech','First Quaker','cormart'),
+                                     ('Geo tech','First Liche','armliche'),
+                                     ('Geo tech','Advanced Geo ready','group:advanced-geo'),
+                                     ('Air','First bomber','group:conventional-bomber'),
+                                     ('Air','First fighter','group:fighter')]:
+            self.choose_timing_position(role); self.click_text(label)
+            self.assertEqual(self.timing_request()['unit'], expected)
+        self.click_text('All factions (unknown)'); self.click_text('Armada')
+        self.click_text('First Fusion')
+        self.assertEqual(self.timing_request()['unit'], 'group:fusion-armada')
+        self.click_text('Unit: Fusion reactors · Armada  [Search]')
+        self.globals.engineTextInput('fusion')
+        self.assertIn('Fusion Reactor [armfus]', self.draw())
+        self.assertNotIn('Fusion Reactor [corfus]', self.draw())
+        self.globals.engineKeyPress(27)
+        self.click_text('Other name'); self.click_text('Current name')
+        self.assertIn('Armada', self.draw())
+        self.assertIn('Air (manual)', self.draw())
+
+    def test_quick_panel_copy_fits_at_common_resolutions(self):
+        self.start(); self.call('TextCommand', 'barfight timing')
+        value = timing_profile()
+        value['positions'][0].update(spot='P7', position_name='Geo tech')
+        self.timing_respond([value], units=quick_catalogue())
+        for width,height in [(1280,720),(1440,900),(1920,1080)]:
+            self.call('ViewResize',width,height)
+            texts = self.draw()
+            self.assertIn('First Quaker',texts)
+            self.assertIn('Advanced Geo ready',texts)
+            copy_label = 'Copied timing' if 'Copied timing' in texts else 'Copy timing'
+            self.assertIn(copy_label,texts)
+            self.click_text(copy_label)
+            self.assertEqual(self.globals.clipboard[len(self.globals.clipboard)], 'Current name - Geo tech - T2 constructors - 4:42')
+
+    def test_manual_start_selection_does_not_leak_across_team_change(self):
+        self.standard_match(); self.start(); self.call('TextCommand', 'barfight timing')
+        self.timing_respond(units=quick_catalogue())
+        self.choose_timing_position('Geo tech')
+        self.click_text('Armada (auto)'); self.click_text('Cortex')
+        self.lua.execute('players[1].team=50; Spring.GetTeamStartPosition=function() return nil end; Spring.GetTeamRulesParam=function() return nil end')
+        self.call('Update', 3)
+        self.assertNotIn('Geo tech (manual)', self.draw())
+        self.assertNotIn('Geo tech (history)', self.draw())
+        self.assertIn('All factions (unknown)', self.draw())
 
     def hover_name(self, text):
         self.draw()
@@ -887,13 +1035,13 @@ class WidgetTests(unittest.TestCase):
             dict(value['positions'][0], spot='P4', position_name='Pond', status='not_observed', samples=0,
                  occurrence_percent=0, mean_seconds=None, median_seconds=None)])
         self.timing_respond([value])
-        self.click_text('Air'); self.click_text('Copy timing')
+        self.choose_timing_position('Air'); self.click_text('Copy timing')
         self.assertEqual(self.globals.clipboard[1], 'Current name - Air - T2 constructors - 6:01')
-        self.click_text('Pond')
+        self.choose_timing_position('Pond')
         self.assertNotIn('Copy timing', self.draw())
         self.assertIn('Not measured', self.draw())
         self.assertNotIn('6:01', self.draw())
-        self.click_text('Tech'); self.click_text('Copy timing')
+        self.choose_timing_position('Tech'); self.click_text('Copy timing')
         self.assertEqual(self.globals.clipboard[2], 'Current name - Tech - T2 constructors - 4:42')
 
     def test_tabs_keep_player_and_historical_position_without_new_lookup(self):
@@ -1088,7 +1236,9 @@ class WidgetTests(unittest.TestCase):
             texts = self.draw()
             self.assertIn('Copy timing', texts)
             self.assertIn('4:42', texts)
-            self.assertIn('Beach sea', texts)
+            self.choose_timing_position('Beach sea')
+            texts = self.draw()
+            self.assertIn('Beach sea (manual)', texts)
             for entry in self.globals.drawn.values():
                 self.assertGreaterEqual(entry['y'], 0)
                 self.assertLessEqual(entry['y'] + entry['size'], height)

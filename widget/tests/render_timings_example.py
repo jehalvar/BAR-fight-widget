@@ -3,7 +3,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from test_widget import WidgetTests, timing_profile
+from test_widget import WidgetTests, timing_profile, quick_catalogue
 
 
 def render():
@@ -17,7 +17,7 @@ def render():
     case.call('TextCommand', 'barfight timing')
     value = timing_profile()
     value['name'] = 'Example player'
-    case.timing_respond([value])
+    case.timing_respond([value], units=quick_catalogue())
     scale, width, height = 2, 900, 720
     font_path = next((p for p in (Path('C:/Windows/Fonts/segoeui.ttf'),
         Path('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')) if p.is_file()), None)
