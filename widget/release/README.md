@@ -37,4 +37,21 @@ powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File ./widget/release/v
 
 ## Release boundaries
 
+### Public guide checks before publication
+
+- Update `widget/README.md` and coordinate the matching
+  [public widget guide](https://bar-fight.com/widget) update in the same release
+  for changes to features, controls, installation, permissions, privacy or data
+  behaviour. The website is maintained separately; updating this repository does
+  not update that page.
+- Review the [Discord bot guide](https://bar-fight.com/discord) for shared data or
+  behaviour changes and coordinate any affected instructions in the same release.
+- Check the guides against the actual client: commands and shortcuts, timing
+  samples, automatic/manual position and faction selection, copy controls,
+  connection states, privacy and updates. Match the public download version and
+  checksum links to the release. Run client checks and coordinate website guide
+  tests, including Discord command coverage when relevant, before publishing.
+- After publication, open the affected guides and verify their instructions and
+  download links. Do not leave public guide updates for a later release.
+
 No production private key, publisher signing credential, website backend, user data, or game asset belongs in the public client repository. Keep generated binaries, downloaded build tools, local configuration, and test output outside source control. GPL-2.0-or-later applies to the client source; it does not imply that separately hosted website services or data are included.

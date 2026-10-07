@@ -10,6 +10,11 @@ The website, hosted API implementation, replay analysis services, databases, res
 
 Follow the [widget guide](widget/README.md). Windows installers and their checksums are published on the [releases page](https://github.com/jehalvar/BAR-fight-widget/releases).
 
+The [public widget guide](https://bar-fight.com/widget) is maintained alongside
+client releases. Maintainers must follow the
+[release guide checklist](widget/release/README.md#public-guide-checks-before-publication)
+when features or user instructions change.
+
 ## Code signing policy
 
 Our application to [SignPath Foundation](https://signpath.org/) is pending. Current installers are unsigned; Foundation signing is not yet active. Read the [Code signing policy](CODE_SIGNING_POLICY.md) for maintainer responsibilities, manual release approval and signing scope, and the [privacy policy](PRIVACY.md) for the client's network requests and controls.
